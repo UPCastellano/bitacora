@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Buscador PDF</title>
+  <!-- Bootstrap CSS -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <!-- DataTables CSS -->
+  <link rel="stylesheet" href="https://cdn.datatables.net/1.13.5/css/dataTables.bootstrap5.min.css">
+  <!-- Font Awesome -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <!-- Estilos personalizados -->
+  <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+  <div class="container my-5">
+    <h1 class="text-center mb-5">Buscador de Documentos PDF</h1>
+    
+    <div class="row">
+      <!-- Sección 1: Subir archivo PDF -->
+      <div class="col-md-12 mb-5">
+        <div class="card">
+          <div class="card-header bg-primary text-white">
+            <h3 class="card-title mb-0"><i class="fas fa-upload me-2"></i>Subir Documento PDF</h3>
+          </div>
+          <div class="card-body">
+            <form id="uploadForm" enctype="multipart/form-data">
+              <div class="mb-3">
+                <label for="pdfFile" class="form-label">Seleccionar archivo PDF</label>
+                <input class="form-control" type="file" id="pdfFile" name="pdfFile" accept="application/pdf" required>
+              </div>
+              <div class="d-grid gap-2">
+                <button type="submit" class="btn btn-primary">
+                  <i class="fas fa-cloud-upload-alt me-2"></i>Subir Documento
+                </button>
+              </div>
+            </form>
+            <div id="uploadStatus" class="mt-3"></div>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Sección 2: Búsqueda avanzada -->
+      <div class="col-md-12 mb-5">
+        <div class="card">
+          <div class="card-header bg-success text-white">
+            <h3 class="card-title mb-0"><i class="fas fa-search me-2"></i>Búsqueda Avanzada</h3>
+          </div>
+          <div class="card-body">
+            <form id="searchForm" action="/resultados" method="GET" target="_blank">
+              <!-- Campos ocultos para enviar a la página de resultados -->
+              <input type="hidden" name="tipo" id="searchTypeHidden" value="serial">
+              <input type="hidden" name="q" id="queryHidden">
+              <input type="hidden" name="doc" id="docHidden">
+              <input type="hidden" name="page" id="pageHidden">
+              
+              <div class="row mb-3">
+                <div class="col-md-6">
+                  <label for="documentSelect" class="form-label">Seleccionar documento</label>
+                  <select class="form-select" id="documentSelect">
+                    <option value="">Todos los documentos</option>
+                  </select>
+                </div>
+                <div class="col-md-3">
+                  <label for="pageNumber" class="form-label">Número de página</label>
+                  <input type="number" class="form-control" id="pageNumber" min="1" disabled>
+                </div>
+                <div class="col-md-3">
+                  <label for="totalPages" class="form-label">Total de páginas</label>
+                  <input type="text" class="form-control" id="totalPages" readonly disabled>
+                </div>
+              </div>
+              <div class="row mb-3">
+                <div class="col-md-12">
+                  <div class="form-check form-check-inline">
+                    <input class="form-check-input" type="radio" name="searchType" id="searchBySerial" value="serial" checked>
+                    <label class="form-check-label" for="searchBySerial">Buscar N⁰ de serie</label>
+                  </div>
+                  <div class="form-check form-check-inline">
+                    <input class="form-check-input" type="radio" name="searchType" id="searchByPage" value="page">
+                    <label class="form-check-label" for="searchByPage">Ver página específica</label>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="row mb-3" id="serialSearchRow">
+                <div class="col-12">
+                  <label for="serialNumber" class="form-label">Número de serie</label>
+                  <div class="input-group">
+                    <span class="input-group-text">N⁰</span>
+                    <input type="text" class="form-control" id="serialNumber" placeholder="Ej: 1000" autocomplete="off">
+                  </div>
+                  <small class="form-text text-muted">Ingrese solo el número sin escribir "N⁰"</small>
+                </div>
+              </div>
+              <div class="row mb-3" id="pageSearchRow" style="display: none;">
+                <div class="col-12">
+                  <div class="alert alert-info">
+                    <i class="fas fa-info-circle me-2"></i>
+                    Seleccione un documento y el número de página para ver su contenido.
+                  </div>
+                </div>
+              </div>
+              <div class="d-grid gap-2">
+                <button type="submit" class="btn btn-success">
+                  <i class="fas fa-search me-2"></i>Buscar en nueva pestaña
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+        
+        <!-- Resultados de búsqueda -->
+        <div class="card mt-3" id="searchResultsCard" style="display: none;">
+          <div class="card-header bg-info text-white">
+            <h3 class="card-title mb-0"><i class="fas fa-list me-2"></i>Resultados de Búsqueda</h3>
+          </div>
+          <div class="card-body">
+            <div id="searchResults"></div>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Sección 3: Tabla de documentos -->
+      <div class="col-md-12">
+        <div class="card">
+          <div class="card-header bg-dark text-white">
+            <h3 class="card-title mb-0"><i class="fas fa-file-pdf me-2"></i>Documentos Subidos</h3>
+          </div>
+          <div class="card-body">
+            <table id="documentosTable" class="table table-striped table-hover">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Nombre</th>
+                  <th>Páginas</th>
+                  <th>Fecha de Subida</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody>
+                <!-- Los datos se cargarán dinámicamente -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Búsqueda por número de serie -->
+    <div class="search-card mt-4">
+      <div class="card-header bg-primary text-white">
+        <h5 class="mb-0">
+          <i class="fas fa-barcode me-2"></i>
+          Búsqueda mejorada por número de serie
+        </h5>
+      </div>
+      <div class="card-body">
+        <form id="serialForm" action="/resultados" method="GET" target="_blank">
+          <input type="hidden" name="tipo" value="serial">
+          <div class="mb-3">
+            <label for="serial" class="form-label">Número de serie</label>
+            <div class="input-group">
+              <span class="input-group-text">N°</span>
+              <input type="text" class="form-control" id="serial" name="valor" placeholder="Ingresa solamente el número" required>
+              <button class="btn btn-primary" type="submit">
+                <i class="fas fa-search me-1"></i> Buscar
+              </button>
+            </div>
+            <div id="serialHelp" class="form-text">
+              Ingresa el número sin prefijos. El sistema buscará todas las variantes (N°, N⁰, Nº, etc.)
+            </div>
+          </div>
+          
+          <div class="mb-3">
+            <div class="form-check">
+              <input class="form-check-input" type="checkbox" id="buscarTodosSerial" checked>
+              <label class="form-check-label" for="buscarTodosSerial">
+                Buscar en todos los documentos
+              </label>
+            </div>
+          </div>
+          
+          <div class="mb-3 d-none" id="selectorDocumentoSerial">
+            <label for="documentoIdSerial" class="form-label">Selecciona un documento</label>
+            <select class="form-select" id="documentoIdSerial" name="documentoId">
+              <option value="">Seleccione...</option>
+              <% if (typeof documentos !== 'undefined' && documentos && documentos.length > 0) { %>
+                <% documentos.forEach(doc => { %>
+                  <option value="<%= doc.id %>"><%= doc.nombre %></option>
+                <% }); %>
+              <% } %>
+            </select>
+          </div>
+          
+          <div class="alert alert-info" role="alert">
+            <i class="fas fa-info-circle me-2"></i>
+            <strong>Mejora para documentos escaneados:</strong>
+            <ul class="mb-0 ps-3 mt-1">
+              <li>La búsqueda detecta automáticamente diferentes formatos de números de serie (N⁰, N°, Nº)</li>
+              <li>Los resultados ahora incluyen un botón para visualizar el <strong>PDF original</strong> en la página exacta</li>
+              <li>Se muestran coincidencias exactas (verde) y posibles coincidencias (amarillo)</li>
+            </ul>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+  <script src="https://cdn.datatables.net/1.13.5/js/jquery.dataTables.min.js"></script>
+  <script src="https://cdn.datatables.net/1.13.5/js/dataTables.bootstrap5.min.js"></script>
+  <script src="/js/main.js"></script>
+  <script>
+    // Script para manejar el selector de documentos en formulario serialForm
+    document.addEventListener('DOMContentLoaded', function() {
+      const buscarTodosSerial = document.getElementById('buscarTodosSerial');
+      const selectorDocumentoSerial = document.getElementById('selectorDocumentoSerial');
+      const documentoIdSerial = document.getElementById('documentoIdSerial');
+      
+      if (buscarTodosSerial && selectorDocumentoSerial && documentoIdSerial) {
+        buscarTodosSerial.addEventListener('change', function() {
+          if (this.checked) {
+            selectorDocumentoSerial.classList.add('d-none');
+            documentoIdSerial.value = '';
+          } else {
+            selectorDocumentoSerial.classList.remove('d-none');
+          }
+        });
+      }
+      
+      // Asegurar que tenemos el selector de documentos actualizado
+      const documentSelect = document.getElementById('documentSelect');
+      if (documentSelect && documentoIdSerial) {
+        // Sincronizar opciones del selector principal al selector del form serial
+        documentSelect.addEventListener('change', function() {
+          // Solo actualizar si estamos en modo de búsqueda por documento específico
+          if (!buscarTodosSerial.checked) {
+            documentoIdSerial.value = this.value;
+          }
+        });
+      }
+    });
+  </script>
+</body>
+</html> 

@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title><%= nombreArchivo %> - Visualización PDF</title>
+  <!-- PDF.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js"></script>
+  <script>
+    // Configurar el worker de PDF.js
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
+  </script>
+  <!-- Bootstrap CSS -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <!-- Font Awesome -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    body, html {
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background-color: #525659;
+    }
+    #pdf-container {
+      width: 100%;
+      height: calc(100vh - 60px);
+      overflow: auto;
+      display: flex;
+      justify-content: center;
+      margin-top: 60px;
+    }
+    #pdf-viewer {
+      box-shadow: 0 0 10px rgba(0, 0, 0, 0.3);
+    }
+    .pdf-controls {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 60px;
+      z-index: 1000;
+      background-color: #343a40;
+      padding: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+    }
+    .control-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .btn-control {
+      color: white;
+      background-color: #0d6efd;
+      border: none;
+      padding: 8px 15px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .btn-control:hover {
+      background-color: #0b5ed7;
+    }
+    .page-info {
+      color: white;
+      font-size: 14px;
+      margin: 0 15px;
+    }
+    .loading-indicator {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background-color: rgba(0, 0, 0, 0.7);
+      color: white;
+      padding: 20px;
+      border-radius: 10px;
+      text-align: center;
+      z-index: 2000;
+    }
+    .spinner-border {
+      width: 3rem;
+      height: 3rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="pdf-controls">
+    <div class="control-group">
+      <button class="btn-control" onclick="window.close()">
+        <i class="fas fa-times me-1"></i>Cerrar
+      </button>
+      <a href="/" class="btn-control">
+        <i class="fas fa-home me-1"></i>Inicio
+      </a>
+    </div>
+    
+    <div class="control-group">
+      <button class="btn-control" id="prev-page">
+        <i class="fas fa-chevron-left"></i>
+      </button>
+      <span class="page-info" id="page-info">Página 0 de 0</span>
+      <button class="btn-control" id="next-page">
+        <i class="fas fa-chevron-right"></i>
+      </button>
+    </div>
+    
+    <div class="control-group">
+      <button class="btn-control" id="zoom-out">
+        <i class="fas fa-search-minus"></i>
+      </button>
+      <button class="btn-control" id="zoom-in">
+        <i class="fas fa-search-plus"></i>
+      </button>
+      <button class="btn-control" id="download-pdf">
+        <i class="fas fa-download me-1"></i>Descargar
+      </button>
+    </div>
+  </div>
+
+  <div id="pdf-container">
+    <canvas id="pdf-viewer"></canvas>
+  </div>
+  
+  <div class="loading-indicator" id="loading">
+    <div class="spinner-border text-light" role="status">
+      <span class="visually-hidden">Cargando...</span>
+    </div>
+    <p class="mt-2">Cargando PDF...</p>
+  </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      const pdfUrl = '/uploads/<%= rutaArchivo %>';
+      const initialPage = parseInt('<%= pagina %>', 10) || 1;
+      let pdfDoc = null;
+      let pageNum = initialPage;
+      let pageRendering = false;
+      let pageNumPending = null;
+      let scale = 1.5;
+      const canvas = document.getElementById('pdf-viewer');
+      const ctx = canvas.getContext('2d');
+      const pageInfo = document.getElementById('page-info');
+      const loadingIndicator = document.getElementById('loading');
+      
+      // Función para renderizar la página
+      function renderPage(num) {
+        pageRendering = true;
+        loadingIndicator.style.display = 'block';
+        
+        // Obtener la página
+        pdfDoc.getPage(num).then(function(page) {
+          const viewport = page.getViewport({ scale: scale });
+          canvas.height = viewport.height;
+          canvas.width = viewport.width;
+          
+          // Renderizar PDF en el canvas
+          const renderContext = {
+            canvasContext: ctx,
+            viewport: viewport
+          };
+          
+          const renderTask = page.render(renderContext);
+          
+          // Esperar a que termine el renderizado
+          renderTask.promise.then(function() {
+            pageRendering = false;
+            loadingIndicator.style.display = 'none';
+            
+            if (pageNumPending !== null) {
+              // Si hay una página pendiente, renderizarla
+              renderPage(pageNumPending);
+              pageNumPending = null;
+            }
+          });
+        });
+        
+        // Actualizar información de página
+        pageInfo.textContent = `Página ${num} de ${pdfDoc.numPages}`;
+      }
+      
+      // Función para cambiar de página
+      function queueRenderPage(num) {
+        if (pageRendering) {
+          pageNumPending = num;
+        } else {
+          renderPage(num);
+        }
+      }
+      
+      // Ir a la página anterior
+      document.getElementById('prev-page').addEventListener('click', function() {
+        if (pageNum <= 1) {
+          return;
+        }
+        pageNum--;
+        queueRenderPage(pageNum);
+      });
+      
+      // Ir a la página siguiente
+      document.getElementById('next-page').addEventListener('click', function() {
+        if (pageNum >= pdfDoc.numPages) {
+          return;
+        }
+        pageNum++;
+        queueRenderPage(pageNum);
+      });
+      
+      // Zoom in
+      document.getElementById('zoom-in').addEventListener('click', function() {
+        scale += 0.25;
+        queueRenderPage(pageNum);
+      });
+      
+      // Zoom out
+      document.getElementById('zoom-out').addEventListener('click', function() {
+        if (scale <= 0.5) {
+          return;
+        }
+        scale -= 0.25;
+        queueRenderPage(pageNum);
+      });
+      
+      // Descargar PDF
+      document.getElementById('download-pdf').addEventListener('click', function() {
+        const link = document.createElement('a');
+        link.href = pdfUrl;
+        link.download = '<%= nombreArchivo %>';
+        link.target = '_blank';
+        link.click();
+      });
+      
+      // Cargar el PDF
+      pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
+        pdfDoc = pdf;
+        
+        // Asegurarse de que la página inicial esté dentro del rango
+        if (initialPage > pdfDoc.numPages) {
+          pageNum = 1;
+        }
+        
+        // Renderizar la primera página
+        renderPage(pageNum);
+      }).catch(function(error) {
+        console.error('Error al cargar el PDF:', error);
+        loadingIndicator.innerHTML = `
+          <div class="alert alert-danger">
+            <i class="fas fa-exclamation-triangle me-2"></i>
+            Error al cargar el PDF: ${error.message}
+          </div>
+        `;
+      });
+    });
+  </script>
+</body>
+</html> 

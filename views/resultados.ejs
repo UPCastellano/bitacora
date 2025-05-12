@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Resultados de Búsqueda - Buscador PDF</title>
+  <!-- Bootstrap CSS -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <!-- DataTables CSS -->
+  <link rel="stylesheet" href="https://cdn.datatables.net/1.13.5/css/dataTables.bootstrap5.min.css">
+  <!-- Font Awesome -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <!-- Estilos personalizados -->
+  <link rel="stylesheet" href="/css/styles.css">
+  <style>
+    .result-container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    #searchResults {
+      max-height: none;
+      padding: 20px;
+    }
+    .full-page-content {
+      max-height: 800px;
+    }
+    body {
+      padding-bottom: 50px;
+    }
+    .btn-back {
+      margin-bottom: 20px;
+    }
+    .result-item {
+      margin-bottom: 30px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+    .pdf-viewer {
+      width: 100%;
+      height: 800px;
+      border: none;
+    }
+    @media print {
+      .no-print {
+        display: none !important;
+      }
+    }
+    .btn-ver-pdf {
+      margin-top: 10px;
+    }
+    .result-card {
+      margin-bottom: 20px;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .result-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    }
+    .card-header {
+      background-color: #f8f9fa;
+      border-bottom: 1px solid #dee2e6;
+      padding: 10px 15px;
+    }
+    .card-body {
+      padding: 15px;
+      background-color: #fff;
+    }
+    .match-context {
+      background-color: #f8f9fa;
+      border-left: 3px solid #6c757d;
+      padding: 10px 15px;
+      margin: 10px 0;
+      border-radius: 0 4px 4px 0;
+      font-family: monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .match-highlight {
+      background-color: #ffc107;
+      padding: 2px 4px;
+      border-radius: 3px;
+      font-weight: bold;
+    }
+    .page-badge {
+      font-size: 0.8rem;
+      padding: 3px 8px;
+      margin-left: 10px;
+      border-radius: 50px;
+    }
+    .view-btn {
+      min-width: 180px;
+    }
+    
+    /* Nuevos estilos para etiquetas de calidad de coincidencia */
+    .match-quality {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 4px;
+      margin-left: 10px;
+      font-size: 0.8rem;
+      font-weight: bold;
+    }
+    .exact-match {
+      background-color: #28a745;
+      color: white;
+    }
+    .possible-match {
+      background-color: #ffc107;
+      color: #212529;
+    }
+    .low-match {
+      background-color: #6c757d;
+      color: white;
+    }
+    
+    /* Estilos para caracteres especiales que pueden aparecer en documentos escaneados */
+    .ocr-char {
+      position: relative;
+      text-decoration: underline dotted;
+      cursor: help;
+    }
+    .ocr-char:hover::after {
+      content: attr(data-original);
+      position: absolute;
+      bottom: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      background-color: #343a40;
+      color: white;
+      padding: 3px 6px;
+      border-radius: 3px;
+      font-size: 0.7rem;
+      white-space: nowrap;
+      z-index: 100;
+    }
+  </style>
+</head>
+<body>
+  <div class="container result-container my-4">
+    <div class="row no-print">
+      <div class="col-12">
+        <a href="/" class="btn btn-primary btn-back">
+          <i class="fas fa-arrow-left me-2"></i>Volver al buscador
+        </a>
+        <button class="btn btn-success ms-2" onclick="window.print()">
+          <i class="fas fa-print me-2"></i>Imprimir resultados
+        </button>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="col-12">
+        <div class="card">
+          <div class="card-header bg-dark text-white">
+            <h3 class="card-title mb-0" id="resultTitle">
+              <i class="fas fa-search me-2"></i>Resultados de búsqueda
+            </h3>
+          </div>
+          <div class="card-body">
+            <div id="searchInfo" class="alert alert-info mb-4">
+              <i class="fas fa-info-circle me-2"></i>
+              Cargando información de búsqueda...
+            </div>
+            <div id="searchResults">
+              <div class="d-flex justify-content-center">
+                <div class="spinner-border text-primary" role="status">
+                  <span class="visually-hidden">Cargando...</span>
+                </div>
+              </div>
+              <p class="text-center mt-3">Cargando resultados...</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      // Obtener los parámetros de la URL
+      const urlParams = new URLSearchParams(window.location.search);
+      const tipo = urlParams.get('tipo') || 'serial';
+      const valor = urlParams.get('valor') || urlParams.get('q') || '';
+      const documentoId = urlParams.get('documentoId') || urlParams.get('doc') || '';
+      const pagina = urlParams.get('pagina') || urlParams.get('page') || '';
+      
+      // Mostrar información de la búsqueda
+      const searchInfo = document.getElementById('searchInfo');
+      const resultTitle = document.getElementById('resultTitle');
+      
+      let infoText = '';
+      let titleText = '';
+      
+      if (tipo === 'page') {
+        infoText = `Mostrando página ${pagina} del documento seleccionado`;
+        titleText = `<i class="fas fa-file-alt me-2"></i>Visualización de página ${pagina}`;
+      } else if (tipo === 'serial') {
+        infoText = `Búsqueda por número de serie: N⁰ ${valor}`;
+        titleText = `<i class="fas fa-search me-2"></i>Resultados para N⁰ ${valor}`;
+      }
+      
+      if (documentoId && tipo !== 'page') {
+        infoText += ` en el documento seleccionado`;
+      }
+      
+      searchInfo.innerHTML = `<i class="fas fa-info-circle me-2"></i>${infoText}`;
+      resultTitle.innerHTML = titleText;
+      
+      // Realizar la búsqueda según el tipo
+      if (tipo === 'page') {
+        realizarBusqueda(tipo, valor, documentoId, pagina);
+      } else if (tipo === 'serial') {
+        realizarBusqueda(tipo, valor, documentoId, '');
+      }
+    });
+    
+    async function realizarBusqueda(tipo, valor, documentoId, pagina) {
+      const searchResults = document.getElementById('searchResults');
+      
+      try {
+        // Construir URL de búsqueda según el tipo
+        let searchUrl;
+        
+        if (tipo === 'page') {
+          searchUrl = `/buscar/pagina?documentoId=${documentoId}&pagina=${pagina}`;
+        } else if (tipo === 'serial') {
+          searchUrl = `/buscar/serial?serial=${encodeURIComponent(valor)}`;
+          if (documentoId) {
+            searchUrl += `&documentoId=${documentoId}`;
+          }
+        }
+        
+        console.log('URL de búsqueda:', searchUrl);
+        const response = await fetch(searchUrl);
+        
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Error en la búsqueda');
+        }
+        
+        const resultados = await response.json();
+        console.log('Resultados recibidos:', resultados);
+        
+        if (resultados.length === 0) {
+          let message = '';
+          if (tipo === 'page') {
+            message = `No se encontró la página ${pagina} en el documento seleccionado`;
+          } else if (tipo === 'serial') {
+            message = `No se encontró el número de serie N⁰ ${valor} en los documentos`;
+          }
+          
+          searchResults.innerHTML = `
+            <div class="alert alert-warning">
+              <i class="fas fa-exclamation-triangle me-2"></i>
+              ${message}
+            </div>
+          `;
+          return;
+        }
+        
+        // Título de resultados
+        let resultsTitle = '';
+        if (tipo === 'page') {
+          resultsTitle = `<h4 class="mb-3">Mostrando página ${pagina} del documento:</h4>`;
+        } else if (tipo === 'serial') {
+          resultsTitle = `<h4 class="mb-3">Se encontraron ${resultados.length} resultados para N⁰ ${valor}:</h4>`;
+        }
+        
+        let resultsHtml = resultsTitle;
+        
+        resultados.forEach((resultado, index) => {
+          let contenidoHtml = resultado.contenido;
+          let esCoincidenciaExacta = resultado.exactMatch;
+          let esPosibleCoincidencia = resultado.possibleMatch;
+          
+          if (!contenidoHtml) {
+            contenidoHtml = 'Sin contenido para mostrar';
+          } else {
+            if (tipo === 'serial') {
+              // Para búsqueda de número de serie, usar un estilo especial
+              
+              // Si tenemos la posición exacta que el servidor encontró, usarla
+              if (resultado.matchedText && resultado.matchPosition >= 0) {
+                console.log(`Resaltando "${resultado.matchedText}" en posición ${resultado.matchPosition}`);
+                
+                // Si tenemos un contexto extraído, usarlo directamente
+                if (resultado.matchContext) {
+                  let extractedContent = resultado.matchContext;
+                  
+                  // Resaltar el texto coincidente dentro del fragmento
+                  const matchTextRegex = new RegExp(resultado.matchedText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+                  extractedContent = extractedContent.replace(matchTextRegex, 
+                    match => `<span class="highlight-serial">${match}</span>`);
+                    
+                  contenidoHtml = extractedContent;
+                } else {
+                  // Extraer un fragmento más grande alrededor del texto coincidente
+                  const startPos = Math.max(0, resultado.matchPosition - 300);
+                  const endPos = Math.min(contenidoHtml.length, resultado.matchPosition + resultado.matchedText.length + 300);
+                  
+                  // Extraer el fragmento
+                  let extractedContent = contenidoHtml.substring(startPos, endPos);
+                  
+                  // Añadir marcadores si es necesario
+                  if (startPos > 0) extractedContent = '...' + extractedContent;
+                  if (endPos < contenidoHtml.length) extractedContent = extractedContent + '...';
+                  
+                  // Resaltar el texto coincidente dentro del fragmento
+                  const matchTextRegex = new RegExp(resultado.matchedText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+                  extractedContent = extractedContent.replace(matchTextRegex, 
+                    match => `<span class="highlight-serial">${match}</span>`);
+                    
+                  contenidoHtml = extractedContent;
+                }
+              } else {
+                // Patrón de búsqueda mejorado para varios formatos posibles
+                const patterns = [
+                  `N⁰\\s*${valor}\\b`,
+                  `N0\\s*${valor}\\b`,
+                  `N°\\s*${valor}\\b`,
+                  `Nº\\s*${valor}\\b`,
+                  `N.{0,1}\\s*${valor}\\b`
+                ];
+                
+                // Variable para saber si encontramos alguna coincidencia
+                let matchFound = false;
+                let extractedContent = '';
+                
+                for (const pattern of patterns) {
+                  const regex = new RegExp(pattern, 'gi');
+                  const matches = contenidoHtml.match(regex);
+                  
+                  if (matches) {
+                    matchFound = true;
+                    console.log(`Patrón "${pattern}" encontró coincidencias:`, matches);
+                    
+                    // Resaltar todas las coincidencias
+                    contenidoHtml = contenidoHtml.replace(regex, match => {
+                      return `<span class="highlight-serial">${match}</span>`;
+                    });
+                    
+                    // Buscar y extraer el contexto
+                    const highlightedMatches = contenidoHtml.match(/<span class="highlight-serial">(.*?)<\/span>/g);
+                    if (highlightedMatches && highlightedMatches.length > 0) {
+                      // Para cada coincidencia, extraer contexto
+                      for (const highlightedMatch of highlightedMatches) {
+                        const index = contenidoHtml.indexOf(highlightedMatch);
+                        if (index !== -1) {
+                          const startExtract = Math.max(0, index - 300);
+                          const endExtract = Math.min(contenidoHtml.length, index + highlightedMatch.length + 300);
+                          let context = contenidoHtml.substring(startExtract, endExtract);
+                          
+                          // Agregar puntos suspensivos si es necesario
+                          if (startExtract > 0) context = '...' + context;
+                          if (endExtract < contenidoHtml.length) context = context + '...';
+                          
+                          extractedContent += `<div class="serial-match-context mb-3">${context}</div>`;
+                        }
+                      }
+                    }
+                  }
+                }
+                
+                // Si encontramos coincidencias y tenemos extractos, usarlos
+                if (matchFound && extractedContent) {
+                  contenidoHtml = extractedContent;
+                } else {
+                  // Si no se encontró ninguna coincidencia con los patrones específicos,
+                  // intentar una búsqueda más general
+                  const generalPattern = new RegExp(`N.?\\s*${valor}`, 'gi');
+                  contenidoHtml = contenidoHtml.replace(generalPattern, match => {
+                    return `<span class="highlight-serial">${match}</span>`;
+                  });
+                  
+                  // Extraer contexto igual que antes si hay coincidencias
+                  const highlightedMatches = contenidoHtml.match(/<span class="highlight-serial">(.*?)<\/span>/g);
+                  if (highlightedMatches && highlightedMatches.length > 0) {
+                    extractedContent = '';
+                    for (const highlightedMatch of highlightedMatches) {
+                      const index = contenidoHtml.indexOf(highlightedMatch);
+                      if (index !== -1) {
+                        const startExtract = Math.max(0, index - 300);
+                        const endExtract = Math.min(contenidoHtml.length, index + highlightedMatch.length + 300);
+                        let context = contenidoHtml.substring(startExtract, endExtract);
+                        
+                        if (startExtract > 0) context = '...' + context;
+                        if (endExtract < contenidoHtml.length) context = context + '...';
+                        
+                        extractedContent += `<div class="serial-match-context mb-3">${context}</div>`;
+                      }
+                    }
+                    if (extractedContent) {
+                      contenidoHtml = extractedContent;
+                    }
+                  }
+                }
+              }
+            }
+          }
+          
+          // Determinar si es una coincidencia exacta para aplicar estilo especial
+          const cardClass = esCoincidenciaExacta ? 'border-success' : (esPosibleCoincidencia ? 'border-warning' : '');
+          const headerClass = esCoincidenciaExacta ? 'bg-success text-white' : (esPosibleCoincidencia ? 'bg-warning' : '');
+          
+          resultsHtml += `
+            <div class="result-item">
+              <div class="card ${cardClass}">
+                <div class="card-header ${headerClass}">
+                  <div class="d-flex justify-content-between align-items-center">
+                    <h5 class="card-title mb-0">
+                      <strong>${resultado.nombre || 'Documento #' + (resultado.documento_id || resultado.id)}</strong>
+                      <span class="badge bg-secondary ms-2">Página ${resultado.numero_pagina}</span>
+                      ${tipo === 'serial' && resultado.matchedText ? 
+                        `<span class="badge bg-dark ms-2">Coincidencia: ${resultado.matchedText}</span>` : ''}
+                    </h5>
+                    ${esCoincidenciaExacta ? 
+                      `<span class="badge bg-success">Coincidencia exacta</span>` : 
+                      (esPosibleCoincidencia ? `<span class="badge bg-warning text-dark">Posible coincidencia</span>` : '')}
+                  </div>
+                </div>
+                <div class="card-body">
+                  <div class="mt-2 ${tipo === 'page' ? 'full-page-content' : ''}">
+                    ${contenidoHtml}
+                  </div>
+                  <div class="mt-3 no-print text-center">
+                    <div class="btn-group">
+                      <a href="/ver-pdf/${resultado.id || resultado.documento_id}?pagina=${resultado.numero_pagina}" 
+                         target="_blank" 
+                         class="btn ${esCoincidenciaExacta ? 'btn-success' : 'btn-primary'} btn-ver-pdf">
+                        <i class="fas fa-file-pdf me-2"></i>Ver en visor personalizado
+                      </a>
+                      <a href="/ver-pdf-directo/${resultado.id || resultado.documento_id}/${resultado.numero_pagina}" 
+                         target="_blank" 
+                         class="btn btn-dark btn-ver-pdf">
+                        <i class="fas fa-external-link-alt me-2"></i>Ver PDF original
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
+        });
+        
+        searchResults.innerHTML = resultsHtml;
+      } catch (error) {
+        console.error('Error en la búsqueda:', error);
+        searchResults.innerHTML = `
+          <div class="alert alert-danger">
+            <i class="fas fa-times-circle me-2"></i>
+            ${error.message || 'Error al realizar la búsqueda. Inténtelo de nuevo.'}
+          </div>
+        `;
+      }
+    }
+  </script>
+</body>
+</html> 
