@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const cors = require('cors');
 const pdfParse = require('pdf-parse');
-const pool = require('./config/database');
+const pool = require('../config/database');
 
 // Este comentario es para forzar un nuevo despliegue en Vercel
 
