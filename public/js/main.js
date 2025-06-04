@@ -159,24 +159,65 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('uploadForm').addEventListener('submit', async function(e) {
     e.preventDefault();
     
-    const formData = new FormData(this);
+    const fileInput = document.getElementById('pdfFile');
+    const pdfFile = fileInput.files[0];
     const uploadStatus = document.getElementById('uploadStatus');
     
-    uploadStatus.innerHTML = '<div class="alert alert-info">Subiendo archivo...</div>';
-    
+    if (!pdfFile) {
+      uploadStatus.innerHTML = '<div class="alert alert-warning">Por favor, seleccione un archivo PDF para subir.</div>';
+      return;
+    }
+
+    uploadStatus.innerHTML = '<div class="alert alert-info">Iniciando subida...</div>';
+
     try {
-      const response = await fetch('/upload', {
+      // Paso 1: Obtener la URL pre-firmada de S3 desde el backend
+      const getSignedUrlResponse = await fetch(`/s3-signed-url?fileName=${encodeURIComponent(pdfFile.name)}&fileType=${encodeURIComponent(pdfFile.type)}`);
+      
+      if (!getSignedUrlResponse.ok) {
+        const errorData = await getSignedUrlResponse.json();
+        throw new Error(`Error al obtener URL pre-firmada: ${errorData.error || getSignedUrlResponse.statusText}`);
+      }
+      
+      const { uploadURL, s3Key } = await getSignedUrlResponse.json();
+      
+      uploadStatus.innerHTML = '<div class="alert alert-info">Subiendo archivo directamente a S3...</div>';
+
+      // Paso 2: Subir el archivo directamente a S3 usando la URL pre-firmada
+      const s3UploadResponse = await fetch(uploadURL, {
+        method: 'PUT',
+        body: pdfFile,
+        headers: {
+          'Content-Type': pdfFile.type
+        }
+      });
+
+      if (!s3UploadResponse.ok) {
+        // S3 no devuelve JSON en errores PUT, así que solo usamos statusText
+        throw new Error(`Error al subir a S3: ${s3UploadResponse.statusText}`);
+      }
+      
+      uploadStatus.innerHTML = '<div class="alert alert-info">Archivo subido a S3. Procesando en el servidor...</div>';
+
+      // Paso 3: Notificar a nuestro backend que el archivo está en S3
+      const backendResponse = await fetch('/upload', {
         method: 'POST',
-        body: formData
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          s3Key: s3Key,
+          originalname: pdfFile.name
+        })
       });
       
-      const result = await response.json();
+      const result = await backendResponse.json();
       
       if (result.success) {
         uploadStatus.innerHTML = `
           <div class="alert alert-success">
             <i class="fas fa-check-circle me-2"></i>
-            Archivo "${result.fileName}" subido correctamente (${result.pages} páginas)
+            Archivo "${result.fileName}" subido y procesado correctamente (${result.pages} páginas)
           </div>
         `;
         document.getElementById('uploadForm').reset();
@@ -185,16 +226,16 @@ document.addEventListener('DOMContentLoaded', function() {
         uploadStatus.innerHTML = `
           <div class="alert alert-danger">
             <i class="fas fa-times-circle me-2"></i>
-            Error: ${result.error}
+            Error en el servidor: ${result.error}
           </div>
         `;
       }
     } catch (error) {
-      console.error('Error:', error);
+      console.error('Error en la subida:', error);
       uploadStatus.innerHTML = `
         <div class="alert alert-danger">
           <i class="fas fa-times-circle me-2"></i>
-          Error al subir el archivo. Inténtelo de nuevo.
+          Error al subir el archivo: ${error.message || 'Inténtelo de nuevo.'}
         </div>
       `;
     }
@@ -233,6 +274,16 @@ async function cargarDocumentos() {
     });
   } catch (error) {
     console.error('Error al cargar documentos:', error);
+    // Mostrar un mensaje de error al usuario si la carga falla
+    const uploadStatus = document.getElementById('uploadStatus'); // Reutilizando este elemento para mensajes generales
+    if (uploadStatus) {
+      uploadStatus.innerHTML = `
+        <div class="alert alert-danger">
+          <i class="fas fa-times-circle me-2"></i>
+          Error al cargar la lista de documentos: ${error.message || 'Por favor, recargue la página.'}
+        </div>
+      `;
+    }
   }
 }
 

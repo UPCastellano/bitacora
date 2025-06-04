@@ -26,19 +26,19 @@ app.use(express.static(path.join(__dirname, '../public')));
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, '../views'));
 
-// Configurar almacenamiento para archivos PDF (usar memoryStorage para S3)
-const upload = multer({
-  storage: multer.memoryStorage(), // Almacenar en memoria temporalmente
-  fileFilter: function (req, file, cb) {
-    if (file.mimetype !== 'application/pdf') {
-      return cb(new Error('Solo se permiten archivos PDF'));
-    }
-    cb(null, true);
-  },
-  limits: {
-    fileSize: 50 * 1024 * 1024 // 50MB límite
-  }
-});
+// Configurar almacenamiento para archivos PDF (eliminar multer.memoryStorage())
+// const upload = multer({
+//   storage: multer.memoryStorage(), // Almacenar en memoria temporalmente
+//   fileFilter: function (req, file, cb) {
+//     if (file.mimetype !== 'application/pdf') {
+//       return cb(new Error('Solo se permiten archivos PDF'));
+//     }
+//     cb(null, true);
+//   },
+//   limits: {
+//     fileSize: 50 * 1024 * 1024 // 50MB límite
+//   }
+// });
 
 // Rutas
 app.get('/', async (req, res) => {
@@ -55,42 +55,58 @@ app.get('/', async (req, res) => {
   }
 });
 
-// Subir PDF
-app.post('/upload', upload.single('pdfFile'), async (req, res) => {
+// Ruta para obtener una URL pre-firmada para subida directa a S3
+app.get('/s3-signed-url', async (req, res) => {
+  const fileName = req.query.fileName;
+  const fileType = req.query.fileType;
+
+  if (!fileName || !fileType) {
+    return res.status(400).json({ error: 'Faltan parámetros: fileName o fileType' });
+  }
+
+  const s3Params = {
+    Bucket: S3_BUCKET_NAME,
+    Key: `pdfs/${Date.now()}-${fileName}`,
+    Expires: 60, // La URL expira en 60 segundos
+    ContentType: fileType,
+    ACL: 'public-read'
+  };
+
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No se ha subido ningún archivo' });
+    const uploadURL = await s3.getSignedUrlPromise('putObject', s3Params);
+    res.json({ uploadURL: uploadURL, s3Key: s3Params.Key });
+  } catch (error) {
+    console.error('Error al obtener URL pre-firmada de S3:', error);
+    res.status(500).json({ error: 'Error al obtener la URL de subida de S3' });
+  }
+});
+
+// Subir PDF (modificado para recibir la URL de S3 y metadatos)
+app.post('/upload', async (req, res) => {
+  try {
+    const { s3Key, originalname } = req.body; // Ahora esperamos solo s3Key y originalname
+
+    if (!s3Key || !originalname) {
+      return res.status(400).json({ error: 'Faltan datos en la solicitud. Asegúrese de que s3Key y originalname estén presentes.' });
     }
 
-    const fileBuffer = req.file.buffer; // El archivo está en memoria
-    const originalname = req.file.originalname;
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const s3Key = `pdfs/${uniqueSuffix}-${originalname}`; // Ruta en S3
+    const s3Location = `https://${S3_BUCKET_NAME}.s3.amazonaws.com/${s3Key}`; // Construir la URL completa de S3
 
-    // Subir archivo a S3
-    const s3UploadParams = {
-      Bucket: S3_BUCKET_NAME,
-      Key: s3Key,
-      Body: fileBuffer,
-      ContentType: req.file.mimetype,
-      ACL: 'public-read' // Esto hace el archivo públicamente accesible
-    };
-
-    let s3Location;
+    // 1. Descargar el PDF de S3
+    let fileBuffer;
     try {
-      const s3UploadResult = await s3.upload(s3UploadParams).promise();
-      s3Location = s3UploadResult.Location; // URL pública del archivo en S3
-      console.log('Archivo subido a S3:', s3Location);
+      const s3Object = await s3.getObject({ Bucket: S3_BUCKET_NAME, Key: s3Key }).promise();
+      fileBuffer = s3Object.Body; // El contenido del archivo está en el cuerpo de la respuesta de S3
     } catch (s3Error) {
-      console.error('Error al subir archivo a S3:', s3Error);
-      return res.status(500).json({ error: 'Error al subir el archivo a S3' });
+      console.error('Error al descargar archivo de S3 para procesamiento:', s3Error);
+      return res.status(500).json({ error: 'Error al descargar el archivo de S3 para procesamiento' });
     }
-    
-    // Extraer texto del PDF desde el buffer en memoria
+
+    // 2. Extraer texto del PDF desde el buffer en memoria
     const pdfData = await pdfParse(fileBuffer);
     const numPaginas = pdfData.numpages;
     const contenidoCompleto = pdfData.text;
-    
+
     // Guardar en la base de datos
     const connection = await pool.getConnection();
     try {
@@ -157,7 +173,8 @@ app.get('/documentos', async (req, res) => {
     res.json(rows);
   } catch (error) {
     console.error('Error al obtener documentos:', error);
-    res.status(500).json({ error: 'Error al obtener los documentos' });
+    // En caso de error, devolver un array vacío para evitar TypeError en el frontend
+    res.status(500).json([]); // Devolver un array vacío para que el frontend no falle con .forEach
   }
 });
 
