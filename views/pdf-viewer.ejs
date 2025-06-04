@@ -134,7 +134,7 @@
 
   <script>
     document.addEventListener('DOMContentLoaded', function() {
-      const pdfUrl = '/uploads/<%= rutaArchivo %>';
+      const pdfUrl = '<%= rutaArchivo %>';
       const initialPage = parseInt('<%= pagina %>', 10) || 1;
       let pdfDoc = null;
       let pageNum = initialPage;

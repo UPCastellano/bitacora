@@ -5,6 +5,7 @@ const fs = require('fs');
 const cors = require('cors');
 const pdfParse = require('pdf-parse');
 const pool = require('../config/database');
+const { s3, S3_BUCKET_NAME } = require('../config/s3'); // Importar S3 y el nombre del bucket
 
 // Este comentario es para forzar un nuevo despliegue en Vercel
 
@@ -18,26 +19,16 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, '../public')));
 
-// Configurar acceso a la carpeta uploads para servir PDFs
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+// No es necesario servir la carpeta 'uploads' localmente ya que los archivos estarán en S3
+// app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // Configurar EJS como motor de plantillas
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, '../views'));
 
-// Configurar almacenamiento para archivos PDF
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, 'uploads/');
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, file.fieldname + '-' + uniqueSuffix + '.pdf');
-  }
-});
-
+// Configurar almacenamiento para archivos PDF (usar memoryStorage para S3)
 const upload = multer({
-  storage: storage,
+  storage: multer.memoryStorage(), // Almacenar en memoria temporalmente
   fileFilter: function (req, file, cb) {
     if (file.mimetype !== 'application/pdf') {
       return cb(new Error('Solo se permiten archivos PDF'));
@@ -71,11 +62,32 @@ app.post('/upload', upload.single('pdfFile'), async (req, res) => {
       return res.status(400).json({ error: 'No se ha subido ningún archivo' });
     }
 
-    const filePath = req.file.path;
-    const dataBuffer = fs.readFileSync(filePath);
+    const fileBuffer = req.file.buffer; // El archivo está en memoria
+    const originalname = req.file.originalname;
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const s3Key = `pdfs/${uniqueSuffix}-${originalname}`; // Ruta en S3
+
+    // Subir archivo a S3
+    const s3UploadParams = {
+      Bucket: S3_BUCKET_NAME,
+      Key: s3Key,
+      Body: fileBuffer,
+      ContentType: req.file.mimetype,
+      ACL: 'public-read' // Esto hace el archivo públicamente accesible
+    };
+
+    let s3Location;
+    try {
+      const s3UploadResult = await s3.upload(s3UploadParams).promise();
+      s3Location = s3UploadResult.Location; // URL pública del archivo en S3
+      console.log('Archivo subido a S3:', s3Location);
+    } catch (s3Error) {
+      console.error('Error al subir archivo a S3:', s3Error);
+      return res.status(500).json({ error: 'Error al subir el archivo a S3' });
+    }
     
-    // Extraer texto del PDF
-    const pdfData = await pdfParse(dataBuffer);
+    // Extraer texto del PDF desde el buffer en memoria
+    const pdfData = await pdfParse(fileBuffer);
     const numPaginas = pdfData.numpages;
     const contenidoCompleto = pdfData.text;
     
@@ -84,10 +96,10 @@ app.post('/upload', upload.single('pdfFile'), async (req, res) => {
     try {
       await connection.beginTransaction();
       
-      // Insertar documento
+      // Insertar documento, guardando la URL de S3
       const [documentoResult] = await connection.execute(
         'INSERT INTO documentos (nombre, ruta_archivo, contenido, num_paginas) VALUES (?, ?, ?, ?)',
-        [req.file.originalname, filePath, contenidoCompleto, numPaginas]
+        [originalname, s3Location, contenidoCompleto, numPaginas]
       );
       
       const documentoId = documentoResult.insertId;
@@ -99,7 +111,7 @@ app.post('/upload', upload.single('pdfFile'), async (req, res) => {
           min: i
         };
         
-        const pageData = await pdfParse(dataBuffer, options);
+        const pageData = await pdfParse(fileBuffer, options);
         
         await connection.execute(
           'INSERT INTO paginas_documento (documento_id, numero_pagina, contenido) VALUES (?, ?, ?)',
@@ -112,18 +124,28 @@ app.post('/upload', upload.single('pdfFile'), async (req, res) => {
         success: true, 
         message: 'Archivo subido y procesado correctamente',
         documentId: documentoId,
-        fileName: req.file.originalname,
-        pages: numPaginas
+        fileName: originalname,
+        pages: numPaginas,
+        s3Url: s3Location
       });
     } catch (error) {
       await connection.rollback();
       console.error('Error al guardar en la base de datos:', error);
-      res.status(500).json({ error: 'Error al procesar el archivo' });
+      // Si hubo un error en DB, intentar eliminar de S3 para evitar archivos huérfanos
+      if (s3Key) {
+        try {
+          await s3.deleteObject({ Bucket: S3_BUCKET_NAME, Key: s3Key }).promise();
+          console.log('Archivo S3 eliminado después de error en DB:', s3Key);
+        } catch (deleteError) {
+          console.error('Error al eliminar archivo de S3 después de error en DB:', deleteError);
+        }
+      }
+      res.status(500).json({ error: 'Error al procesar el archivo o guardar en la base de datos' });
     } finally {
       connection.release();
     }
   } catch (error) {
-    console.error('Error al procesar el PDF:', error);
+    console.error('Error general en la subida:', error);
     res.status(500).json({ error: 'Error al procesar el archivo PDF' });
   }
 });
@@ -148,7 +170,7 @@ app.delete('/documentos/:id', async (req, res) => {
     try {
       await connection.beginTransaction();
       
-      // Obtener la ruta del archivo antes de eliminar
+      // Obtener la ruta del archivo (URL de S3) antes de eliminar
       const [documentos] = await connection.execute(
         'SELECT ruta_archivo FROM documentos WHERE id = ?',
         [documentoId]
@@ -158,7 +180,11 @@ app.delete('/documentos/:id', async (req, res) => {
         return res.status(404).json({ error: 'Documento no encontrado' });
       }
       
-      const rutaArchivo = documentos[0].ruta_archivo;
+      const rutaArchivoS3 = documentos[0].ruta_archivo; // Esto es la URL de S3
+      
+      // Extraer la clave de S3 de la URL
+      // Asumiendo que la URL es algo como https://BUCKET_NAME.s3.REGION.amazonaws.com/pdfs/unique-name.pdf
+      const s3Key = rutaArchivoS3.split('/').slice(3).join('/'); // Extraer clave después del dominio
       
       // Eliminar el documento de la base de datos
       // (Las páginas se eliminarán automáticamente por la restricción de clave foránea ON DELETE CASCADE)
@@ -167,12 +193,15 @@ app.delete('/documentos/:id', async (req, res) => {
         [documentoId]
       );
       
-      // Eliminar el archivo físico
-      try {
-        fs.unlinkSync(rutaArchivo);
-      } catch (fsError) {
-        console.error('Error al eliminar el archivo físico:', fsError);
-        // No interrumpimos la transacción por este error
+      // Eliminar el archivo de S3
+      if (s3Key && S3_BUCKET_NAME) {
+        try {
+          await s3.deleteObject({ Bucket: S3_BUCKET_NAME, Key: s3Key }).promise();
+          console.log('Archivo S3 eliminado:', s3Key);
+        } catch (s3Error) {
+          console.error('Error al eliminar archivo de S3:', s3Error);
+          // No interrumpimos la transacción por este error (el registro de la DB ya se eliminó)
+        }
       }
       
       await connection.commit();
@@ -477,7 +506,7 @@ app.get('/ver-pdf/:id', async (req, res) => {
     
     console.log(`Solicitando PDF del documento ${documentoId}, página ${pagina}`);
     
-    // Obtener la ruta del archivo desde la base de datos
+    // Obtener la ruta del archivo (URL de S3) desde la base de datos
     const [documentos] = await pool.execute(
       'SELECT ruta_archivo, nombre FROM documentos WHERE id = ?',
       [documentoId]
@@ -487,18 +516,14 @@ app.get('/ver-pdf/:id', async (req, res) => {
       return res.status(404).send('Documento no encontrado');
     }
     
-    const rutaArchivo = documentos[0].ruta_archivo;
+    const rutaArchivoS3 = documentos[0].ruta_archivo; // Esto ya debería ser la URL de S3
     const nombreArchivo = documentos[0].nombre;
     
-    // Verificar si el archivo existe
-    if (!fs.existsSync(rutaArchivo)) {
-      return res.status(404).send('El archivo PDF no se encuentra en el servidor');
-    }
-    
-    // Servir el PDF con la página específica
-    // Creamos una página HTML que cargará el PDF en la página específica
+    // No es necesario verificar fs.existsSync aquí, el archivo está en S3
+
+    // Servir el PDF con la página específica (se le pasa la URL de S3)
     res.render('pdf-viewer', {
-      rutaArchivo: path.basename(rutaArchivo),
+      rutaArchivo: rutaArchivoS3, // Pasar la URL completa de S3
       pagina: pagina,
       nombreArchivo: nombreArchivo
     });
@@ -516,7 +541,7 @@ app.get('/ver-pdf-directo/:documentoId/:pagina', async (req, res) => {
     
     console.log(`Mostrando PDF directo del documento ${documentoId}, página ${pagina}`);
     
-    // Obtener la ruta del archivo desde la base de datos
+    // Obtener la ruta del archivo (URL de S3) desde la base de datos
     const [documentos] = await pool.execute(
       'SELECT ruta_archivo, nombre FROM documentos WHERE id = ?',
       [documentoId]
@@ -526,24 +551,11 @@ app.get('/ver-pdf-directo/:documentoId/:pagina', async (req, res) => {
       return res.status(404).send('Documento no encontrado');
     }
     
-    const rutaArchivo = documentos[0].ruta_archivo;
+    const rutaArchivoS3 = documentos[0].ruta_archivo; // Esto ya debería ser la URL de S3
     
-    // Verificar si el archivo existe
-    if (!fs.existsSync(rutaArchivo)) {
-      return res.status(404).send('El archivo PDF no se encuentra en el servidor');
-    }
+    // Redirigir directamente a la URL de S3 con el parámetro de página
+    res.redirect(`${rutaArchivoS3}#page=${pagina}`);
     
-    // Configurar encabezados para mostrar el PDF en el navegador
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'inline');
-    
-    // Leer el archivo y enviarlo al cliente
-    const fileStream = fs.createReadStream(rutaArchivo);
-    
-    // Agregar parámetro de página para que el navegador abra en la página específica
-    res.setHeader('Content-Disposition', `inline; filename="${path.basename(rutaArchivo)}#page=${pagina}"`);
-    
-    fileStream.pipe(res);
   } catch (error) {
     console.error('Error al mostrar el PDF directo:', error);
     res.status(500).send('Error al obtener el PDF');
