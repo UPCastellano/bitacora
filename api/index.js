@@ -5,7 +5,6 @@ const fs = require('fs');
 const cors = require('cors');
 const pdfParse = require('pdf-parse');
 const pool = require('../config/database');
-const { s3, S3_BUCKET_NAME } = require('../config/s3'); // Importar S3 y el nombre del bucket
 
 // Este comentario es para forzar un nuevo despliegue en Vercel
 
@@ -19,32 +18,32 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static(path.join(__dirname, '../public')));
 
-// No es necesario servir la carpeta 'uploads' localmente ya que los archivos estarán en S3
+// No es necesario servir la carpeta 'uploads' localmente ya que los archivos estarán en la base de datos
 // app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // Configurar EJS como motor de plantillas
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, '../views'));
 
-// Configurar almacenamiento para archivos PDF (eliminar multer.memoryStorage())
-// const upload = multer({
-//   storage: multer.memoryStorage(), // Almacenar en memoria temporalmente
-//   fileFilter: function (req, file, cb) {
-//     if (file.mimetype !== 'application/pdf') {
-//       return cb(new Error('Solo se permiten archivos PDF'));
-//     }
-//     cb(null, true);
-//   },
-//   limits: {
-//     fileSize: 50 * 1024 * 1024 // 50MB límite
-//   }
-// });
+// Configurar almacenamiento para archivos PDF (usar memoryStorage para guardar en DB)
+const upload = multer({
+  storage: multer.memoryStorage(), // Almacenar en memoria temporalmente para leer el buffer
+  fileFilter: function (req, file, cb) {
+    if (file.mimetype !== 'application/pdf') {
+      return cb(new Error('Solo se permiten archivos PDF'));
+    }
+    cb(null, true);
+  },
+  limits: {
+    fileSize: 50 * 1024 * 1024 // 50MB límite, ajusta si es necesario
+  }
+});
 
 // Rutas
 app.get('/', async (req, res) => {
   try {
     // Obtenemos todos los documentos para pasarlos a la vista
-    const [documentos] = await pool.execute('SELECT id, nombre, num_paginas, fecha_subida FROM documentos ORDER BY fecha_subida DESC');
+    const [documentos] = await pool.query('SELECT id, nombre, num_paginas, fecha_subida FROM documentos ORDER BY fecha_subida DESC');
     
     // Renderizamos la vista con los documentos
     res.render('index', { documentos });
@@ -55,70 +54,59 @@ app.get('/', async (req, res) => {
   }
 });
 
-// Ruta para obtener una URL pre-firmada para subida directa a S3
-app.get('/s3-signed-url', async (req, res) => {
-  const fileName = req.query.fileName;
-  const fileType = req.query.fileType;
+// Ruta para obtener una URL pre-firmada para subida directa a S3 (¡Esta ruta ya no se usa y se eliminará!)
+// app.get('/s3-signed-url', async (req, res) => {
+//   const fileName = req.query.fileName;
+//   const fileType = req.query.fileType;
 
-  if (!fileName || !fileType) {
-    return res.status(400).json({ error: 'Faltan parámetros: fileName o fileType' });
-  }
+//   if (!fileName || !fileType) {
+//     return res.status(400).json({ error: 'Faltan parámetros: fileName o fileType' });
+//   }
 
-  const s3Params = {
-    Bucket: S3_BUCKET_NAME,
-    Key: `pdfs/${Date.now()}-${fileName}`,
-    Expires: 60, // La URL expira en 60 segundos
-    ContentType: fileType,
-    ACL: 'public-read'
-  };
+//   const s3Params = {
+//     Bucket: S3_BUCKET_NAME,
+//     Key: `pdfs/${Date.now()}-${fileName}`,
+//     Expires: 60, // La URL expira en 60 segundos
+//     ContentType: fileType,
+//     ACL: 'public-read'
+//   };
 
+//   try {
+//     const uploadURL = await s3.getSignedUrlPromise('putObject', s3Params);
+//     res.json({ uploadURL: uploadURL, s3Key: s3Params.Key });
+//   } catch (error) {
+//     console.error('Error al obtener URL pre-firmada de S3:', error);
+//     res.status(500).json({ error: 'Error al obtener la URL de subida de S3' });
+//   }
+// });
+
+// Subir PDF (modificado para guardar directamente en PostgreSQL)
+app.post('/upload', upload.single('pdfFile'), async (req, res) => {
   try {
-    const uploadURL = await s3.getSignedUrlPromise('putObject', s3Params);
-    res.json({ uploadURL: uploadURL, s3Key: s3Params.Key });
-  } catch (error) {
-    console.error('Error al obtener URL pre-firmada de S3:', error);
-    res.status(500).json({ error: 'Error al obtener la URL de subida de S3' });
-  }
-});
-
-// Subir PDF (modificado para recibir la URL de S3 y metadatos)
-app.post('/upload', async (req, res) => {
-  try {
-    const { s3Key, originalname } = req.body; // Ahora esperamos solo s3Key y originalname
-
-    if (!s3Key || !originalname) {
-      return res.status(400).json({ error: 'Faltan datos en la solicitud. Asegúrese de que s3Key y originalname estén presentes.' });
+    if (!req.file) {
+      return res.status(400).json({ error: 'No se ha subido ningún archivo' });
     }
 
-    const s3Location = `https://${S3_BUCKET_NAME}.s3.amazonaws.com/${s3Key}`; // Construir la URL completa de S3
-
-    // 1. Descargar el PDF de S3
-    let fileBuffer;
-    try {
-      const s3Object = await s3.getObject({ Bucket: S3_BUCKET_NAME, Key: s3Key }).promise();
-      fileBuffer = s3Object.Body; // El contenido del archivo está en el cuerpo de la respuesta de S3
-    } catch (s3Error) {
-      console.error('Error al descargar archivo de S3 para procesamiento:', s3Error);
-      return res.status(500).json({ error: 'Error al descargar el archivo de S3 para procesamiento' });
-    }
-
-    // 2. Extraer texto del PDF desde el buffer en memoria
+    const fileBuffer = req.file.buffer; // Contenido binario del PDF
+    const originalname = req.file.originalname;
+    
+    // Extraer texto del PDF desde el buffer en memoria
     const pdfData = await pdfParse(fileBuffer);
     const numPaginas = pdfData.numpages;
     const contenidoCompleto = pdfData.text;
-
+    
     // Guardar en la base de datos
-    const connection = await pool.getConnection();
+    const connection = await pool.connect(); // Usar pool.connect() para pg
     try {
-      await connection.beginTransaction();
+      await connection.query('BEGIN'); // Iniciar transacción
       
-      // Insertar documento, guardando la URL de S3
-      const [documentoResult] = await connection.execute(
-        'INSERT INTO documentos (nombre, ruta_archivo, contenido, num_paginas) VALUES (?, ?, ?, ?)',
-        [originalname, s3Location, contenidoCompleto, numPaginas]
+      // Insertar documento con el contenido binario del PDF
+      const documentoResult = await connection.query(
+        'INSERT INTO documentos (nombre, contenido_pdf, contenido, num_paginas) VALUES ($1, $2, $3, $4) RETURNING id',
+        [originalname, fileBuffer, contenidoCompleto, numPaginas]
       );
       
-      const documentoId = documentoResult.insertId;
+      const documentoId = documentoResult.rows[0].id; // Obtener el ID del documento insertado
       
       // Extraer y guardar contenido por página
       for (let i = 1; i <= numPaginas; i++) {
@@ -129,36 +117,26 @@ app.post('/upload', async (req, res) => {
         
         const pageData = await pdfParse(fileBuffer, options);
         
-        await connection.execute(
-          'INSERT INTO paginas_documento (documento_id, numero_pagina, contenido) VALUES (?, ?, ?)',
+        await connection.query(
+          'INSERT INTO paginas_documento (documento_id, numero_pagina, contenido) VALUES ($1, $2, $3)',
           [documentoId, i, pageData.text]
         );
       }
       
-      await connection.commit();
+      await connection.query('COMMIT'); // Confirmar transacción
       res.json({ 
         success: true, 
         message: 'Archivo subido y procesado correctamente',
         documentId: documentoId,
         fileName: originalname,
-        pages: numPaginas,
-        s3Url: s3Location
+        pages: numPaginas
       });
     } catch (error) {
-      await connection.rollback();
+      await connection.query('ROLLBACK'); // Revertir transacción en caso de error
       console.error('Error al guardar en la base de datos:', error);
-      // Si hubo un error en DB, intentar eliminar de S3 para evitar archivos huérfanos
-      if (s3Key) {
-        try {
-          await s3.deleteObject({ Bucket: S3_BUCKET_NAME, Key: s3Key }).promise();
-          console.log('Archivo S3 eliminado después de error en DB:', s3Key);
-        } catch (deleteError) {
-          console.error('Error al eliminar archivo de S3 después de error en DB:', deleteError);
-        }
-      }
       res.status(500).json({ error: 'Error al procesar el archivo o guardar en la base de datos' });
     } finally {
-      connection.release();
+      connection.release(); // Liberar la conexión al pool
     }
   } catch (error) {
     console.error('Error general en la subida:', error);
@@ -169,8 +147,9 @@ app.post('/upload', async (req, res) => {
 // Obtener todos los documentos
 app.get('/documentos', async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT id, nombre, num_paginas, fecha_subida FROM documentos ORDER BY fecha_subida DESC');
-    res.json(rows);
+    // Usar pool.query para PostgreSQL
+    const result = await pool.query('SELECT id, nombre, num_paginas, fecha_subida FROM documentos ORDER BY fecha_subida DESC');
+    res.json(result.rows);
   } catch (error) {
     console.error('Error al obtener documentos:', error);
     // En caso de error, devolver un array vacío para evitar TypeError en el frontend
@@ -178,53 +157,26 @@ app.get('/documentos', async (req, res) => {
   }
 });
 
-// Eliminar documento
+// Eliminar documento (modificado para PostgreSQL y sin S3)
 app.delete('/documentos/:id', async (req, res) => {
   const documentoId = req.params.id;
   
   try {
-    const connection = await pool.getConnection();
+    const connection = await pool.connect();
     try {
-      await connection.beginTransaction();
+      await connection.query('BEGIN');
       
-      // Obtener la ruta del archivo (URL de S3) antes de eliminar
-      const [documentos] = await connection.execute(
-        'SELECT ruta_archivo FROM documentos WHERE id = ?',
+      // No necesitamos obtener la ruta del archivo, el PDF está en la DB y se elimina con el registro.
+      // La restricción ON DELETE CASCADE en paginas_documento se encargará de las páginas.
+      await connection.query(
+        'DELETE FROM documentos WHERE id = $1',
         [documentoId]
       );
       
-      if (documentos.length === 0) {
-        return res.status(404).json({ error: 'Documento no encontrado' });
-      }
-      
-      const rutaArchivoS3 = documentos[0].ruta_archivo; // Esto es la URL de S3
-      
-      // Extraer la clave de S3 de la URL
-      // Asumiendo que la URL es algo como https://BUCKET_NAME.s3.REGION.amazonaws.com/pdfs/unique-name.pdf
-      const s3Key = rutaArchivoS3.split('/').slice(3).join('/'); // Extraer clave después del dominio
-      
-      // Eliminar el documento de la base de datos
-      // (Las páginas se eliminarán automáticamente por la restricción de clave foránea ON DELETE CASCADE)
-      await connection.execute(
-        'DELETE FROM documentos WHERE id = ?',
-        [documentoId]
-      );
-      
-      // Eliminar el archivo de S3
-      if (s3Key && S3_BUCKET_NAME) {
-        try {
-          await s3.deleteObject({ Bucket: S3_BUCKET_NAME, Key: s3Key }).promise();
-          console.log('Archivo S3 eliminado:', s3Key);
-        } catch (s3Error) {
-          console.error('Error al eliminar archivo de S3:', s3Error);
-          // No interrumpimos la transacción por este error (el registro de la DB ya se eliminó)
-        }
-      }
-      
-      await connection.commit();
+      await connection.query('COMMIT');
       res.json({ success: true, message: 'Documento eliminado correctamente' });
     } catch (error) {
-      await connection.rollback();
+      await connection.query('ROLLBACK');
       console.error('Error al eliminar documento:', error);
       res.status(500).json({ error: 'Error al eliminar el documento' });
     } finally {
@@ -260,11 +212,11 @@ app.get('/buscar/serial', async (req, res) => {
         SELECT d.id, d.nombre, d.num_paginas, p.id as pagina_id, p.numero_pagina, p.contenido 
         FROM documentos d 
         JOIN paginas_documento p ON d.id = p.documento_id 
-        WHERE d.id = ? AND (
-          p.contenido LIKE ? OR 
-          p.contenido LIKE ? OR 
-          p.contenido LIKE ? OR
-          p.contenido LIKE ?
+        WHERE d.id = $1 AND (
+          p.contenido ILIKE $2 OR 
+          p.contenido ILIKE $3 OR 
+          p.contenido ILIKE $4 OR
+          p.contenido ILIKE $5
         )
         ORDER BY p.numero_pagina ASC
       `;
@@ -283,10 +235,10 @@ app.get('/buscar/serial', async (req, res) => {
         FROM documentos d 
         JOIN paginas_documento p ON d.id = p.documento_id 
         WHERE 
-          p.contenido LIKE ? OR 
-          p.contenido LIKE ? OR 
-          p.contenido LIKE ? OR
-          p.contenido LIKE ?
+          p.contenido ILIKE $1 OR 
+          p.contenido ILIKE $2 OR 
+          p.contenido ILIKE $3 OR
+          p.contenido ILIKE $4
         ORDER BY d.id ASC, p.numero_pagina ASC
       `;
       params = [
@@ -299,11 +251,11 @@ app.get('/buscar/serial', async (req, res) => {
     
     console.log('SQL:', sql, 'Params:', params);
     
-    const [resultados] = await pool.execute(sql, params);
-    console.log(`Se encontraron ${resultados.length} resultados`);
+    const resultados = await pool.query(sql, params);
+    console.log(`Se encontraron ${resultados.rows.length} resultados`);
     
     // Si no encontramos resultados, intentar con una búsqueda más amplia
-    if (resultados.length === 0) {
+    if (resultados.rows.length === 0) {
       console.log('No se encontraron resultados con búsqueda específica, intentando búsqueda más amplia...');
       
       // Segunda búsqueda más amplia
@@ -314,9 +266,9 @@ app.get('/buscar/serial', async (req, res) => {
           SELECT d.id, d.nombre, d.num_paginas, p.id as pagina_id, p.numero_pagina, p.contenido 
           FROM documentos d 
           JOIN paginas_documento p ON d.id = p.documento_id 
-          WHERE d.id = ? AND (
-            p.contenido LIKE ? OR 
-            p.contenido LIKE ?
+          WHERE d.id = $1 AND (
+            p.contenido ILIKE $2 OR 
+            p.contenido ILIKE $3
           )
           ORDER BY p.numero_pagina ASC
         `;
@@ -331,8 +283,8 @@ app.get('/buscar/serial', async (req, res) => {
           FROM documentos d 
           JOIN paginas_documento p ON d.id = p.documento_id 
           WHERE 
-            p.contenido LIKE ? OR 
-            p.contenido LIKE ?
+            p.contenido ILIKE $1 OR 
+            p.contenido ILIKE $2
           ORDER BY d.id ASC, p.numero_pagina ASC
           LIMIT 20
         `;
@@ -342,19 +294,19 @@ app.get('/buscar/serial', async (req, res) => {
         ];
       }
       
-      const [resultadosAmpliados] = await pool.execute(sql2, params2);
-      if (resultadosAmpliados.length > 0) {
-        console.log(`Búsqueda ampliada encontró ${resultadosAmpliados.length} resultados`);
+      const resultadosAmpliados = await pool.query(sql2, params2);
+      if (resultadosAmpliados.rows.length > 0) {
+        console.log(`Búsqueda ampliada encontró ${resultadosAmpliados.rows.length} resultados`);
       }
       
       // Combinar resultados si encontramos algo
-      if (resultadosAmpliados.length > 0) {
-        resultados.push(...resultadosAmpliados);
+      if (resultadosAmpliados.rows.length > 0) {
+        resultados.rows.push(...resultadosAmpliados.rows);
       }
     }
     
     // Procesar cada resultado para encontrar y marcar la coincidencia exacta
-    const results = resultados.map(result => {
+    const results = resultados.rows.map(result => {
       if (result.contenido) {
         // Lista de patrones específicos para el número de serie
         const patrones = [
@@ -381,7 +333,6 @@ app.get('/buscar/serial', async (req, res) => {
               const endPos = Math.min(result.contenido.length, match.index + match[0].length + 150);
               result.matchContext = result.contenido.substring(startPos, endPos);
               
-              // Marcar esta como coincidencia exacta
               result.exactMatch = true;
               break;
             }
@@ -455,7 +406,7 @@ app.get('/buscar/pagina', async (req, res) => {
     console.log(`Buscando página ${paginaNum} del documento ${documentoId}`);
     
     // Obtener información del documento y la página en una consulta
-    const [resultados] = await pool.execute(`
+    const result = await pool.query(`
       SELECT 
         d.id, 
         d.nombre, 
@@ -464,10 +415,12 @@ app.get('/buscar/pagina', async (req, res) => {
         p.numero_pagina, 
         p.contenido 
       FROM documentos d 
-      LEFT JOIN paginas_documento p ON d.id = p.documento_id AND p.numero_pagina = ?
-      WHERE d.id = ?
+      LEFT JOIN paginas_documento p ON d.id = p.documento_id AND p.numero_pagina = $1
+      WHERE d.id = $2
     `, [paginaNum, documentoId]);
     
+    const resultados = result.rows;
+
     if (resultados.length === 0) {
       return res.status(404).json({ error: 'No se encontró el documento especificado' });
     }
@@ -515,67 +468,74 @@ app.get('/resultados', (req, res) => {
   });
 });
 
-// Nueva ruta para ver PDF en página específica
+// Nueva ruta para ver PDF en página específica (ahora sirve el PDF desde la DB)
 app.get('/ver-pdf/:id', async (req, res) => {
   try {
     const documentoId = req.params.id;
-    const pagina = req.query.pagina || 1;
     
-    console.log(`Solicitando PDF del documento ${documentoId}, página ${pagina}`);
+    console.log(`Solicitando PDF binario del documento ${documentoId}`);
     
-    // Obtener la ruta del archivo (URL de S3) desde la base de datos
-    const [documentos] = await pool.execute(
-      'SELECT ruta_archivo, nombre FROM documentos WHERE id = ?',
+    // Obtener el contenido binario del PDF desde la base de datos
+    const result = await pool.query(
+      'SELECT nombre, contenido_pdf FROM documentos WHERE id = $1',
       [documentoId]
     );
     
-    if (documentos.length === 0) {
-      return res.status(404).send('Documento no encontrado');
+    const documentos = result.rows;
+
+    if (documentos.length === 0 || !documentos[0].contenido_pdf) {
+      return res.status(404).send('Documento no encontrado o contenido PDF vacío');
     }
     
-    const rutaArchivoS3 = documentos[0].ruta_archivo; // Esto ya debería ser la URL de S3
+    const pdfBuffer = documentos[0].contenido_pdf; // El contenido binario del PDF
     const nombreArchivo = documentos[0].nombre;
-    
-    // No es necesario verificar fs.existsSync aquí, el archivo está en S3
 
-    // Servir el PDF con la página específica (se le pasa la URL de S3)
-    res.render('pdf-viewer', {
-      rutaArchivo: rutaArchivoS3, // Pasar la URL completa de S3
-      pagina: pagina,
-      nombreArchivo: nombreArchivo
-    });
+    // Establecer cabeceras para el archivo PDF
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${nombreArchivo.replace(/\s/g, '_')}.pdf"`);
+    res.send(pdfBuffer); // Enviar el buffer binario directamente
+    
   } catch (error) {
-    console.error('Error al obtener el PDF:', error);
-    res.status(500).send('Error al obtener el PDF');
+    console.error('Error al obtener el PDF desde la DB:', error);
+    res.status(500).send('Error al obtener el PDF desde la base de datos');
   }
 });
 
-// Nueva ruta para ver el PDF directamente con la página correcta
+// Nueva ruta para ver el PDF directamente con la página correcta (ahora sirve el PDF desde la DB)
 app.get('/ver-pdf-directo/:documentoId/:pagina', async (req, res) => {
   try {
     const documentoId = req.params.documentoId;
-    const pagina = parseInt(req.params.pagina) || 1;
+    const pagina = parseInt(req.params.pagina) || 1; // La página se usará solo para la redirección en el frontend
     
     console.log(`Mostrando PDF directo del documento ${documentoId}, página ${pagina}`);
     
-    // Obtener la ruta del archivo (URL de S3) desde la base de datos
-    const [documentos] = await pool.execute(
-      'SELECT ruta_archivo, nombre FROM documentos WHERE id = ?',
+    // Obtener el contenido binario del PDF desde la base de datos
+    const result = await pool.query(
+      'SELECT nombre, contenido_pdf FROM documentos WHERE id = $1',
       [documentoId]
     );
     
-    if (documentos.length === 0) {
-      return res.status(404).send('Documento no encontrado');
+    const documentos = result.rows;
+
+    if (documentos.length === 0 || !documentos[0].contenido_pdf) {
+      return res.status(404).send('Documento no encontrado o contenido PDF vacío');
     }
     
-    const rutaArchivoS3 = documentos[0].ruta_archivo; // Esto ya debería ser la URL de S3
+    const pdfBuffer = documentos[0].contenido_pdf;
+    const nombreArchivo = documentos[0].nombre;
+
+    // Establecer cabeceras para el archivo PDF
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${nombreArchivo.replace(/\s/g, '_')}.pdf"`);
     
-    // Redirigir directamente a la URL de S3 con el parámetro de página
-    res.redirect(`${rutaArchivoS3}#page=${pagina}`);
+    // Para PDF.js y la navegación por página, es mejor redirigir a la ruta /ver-pdf/:id
+    // y luego pasar el parámetro de página en el frontend.
+    // Aquí, simplemente enviamos el PDF y el frontend lo manejará.
+    res.send(pdfBuffer);
     
   } catch (error) {
-    console.error('Error al mostrar el PDF directo:', error);
-    res.status(500).send('Error al obtener el PDF');
+    console.error('Error al mostrar el PDF directo desde la DB:', error);
+    res.status(500).send('Error al obtener el PDF desde la base de datos');
   }
 });
 

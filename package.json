@@ -21,6 +21,7 @@
     "mysql2": "^3.14.1",
     "pdf-parse": "^1.1.1",
     "pdfbusqueda": "file:",
+    "pg": "^8.16.0",
     "readable-stream": "^4.0.0"
   },
   "devDependencies": {

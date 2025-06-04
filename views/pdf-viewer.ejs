@@ -134,7 +134,7 @@
 
   <script>
     document.addEventListener('DOMContentLoaded', function() {
-      const pdfUrl = '<%= rutaArchivo %>';
+      const documentoId = '<%= idDocumento %>'; // Obtener el ID del documento, no la ruta
       const initialPage = parseInt('<%= pagina %>', 10) || 1;
       let pdfDoc = null;
       let pageNum = initialPage;
@@ -146,7 +146,7 @@
       const pageInfo = document.getElementById('page-info');
       const loadingIndicator = document.getElementById('loading');
       
-      console.log('PDF Viewer: Ruta del archivo PDF:', pdfUrl);
+      console.log('PDF Viewer: ID del Documento:', documentoId);
       console.log('PDF Viewer: Página inicial recibida:', initialPage);
       
       // Función para renderizar la página
@@ -194,6 +194,57 @@
         }
       }
       
+      // Cargar el documento PDF
+      async function loadPdf() {
+        try {
+          console.log('Cargando PDF desde el backend para el ID:', documentoId);
+          const response = await fetch(`/ver-pdf/${documentoId}`); // Hacer fetch al endpoint que sirve el PDF binario
+          
+          if (!response.ok) {
+            throw new Error(`Error al cargar el PDF: ${response.statusText}`);
+          }
+          
+          const pdfData = await response.arrayBuffer(); // Obtener el contenido binario como ArrayBuffer
+          
+          pdfjsLib.getDocument({ data: pdfData }).promise.then(function(pdf) {
+            pdfDoc = pdf;
+            document.getElementById('download-pdf').addEventListener('click', function() {
+              pdfDoc.getData().then(function(data) {
+                const blob = new Blob([data], { type: 'application/pdf' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = '<%= nombreArchivo %>'; // Usar el nombre del archivo pasado desde el backend
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+              });
+            });
+            renderPage(pageNum);
+          }).catch(function(error) {
+            console.error('Error al cargar el PDF:', error);
+            loadingIndicator.innerHTML = `
+              <div class="alert alert-danger" role="alert">
+                Error al cargar el PDF: ${error.message || 'Hubo un problema desconocido.'}
+              </div>
+            `;
+            loadingIndicator.style.display = 'block';
+          });
+        } catch (error) {
+          console.error('Error en la solicitud para obtener el PDF:', error);
+          loadingIndicator.innerHTML = `
+            <div class="alert alert-danger" role="alert">
+              Error en la solicitud para obtener el PDF: ${error.message || 'Verifique su conexión.'}
+            </div>
+          `;
+          loadingIndicator.style.display = 'block';
+        }
+      }
+
+      // Cargar el PDF al iniciar
+      loadPdf();
+
       // Ir a la página anterior
       document.getElementById('prev-page').addEventListener('click', function() {
         if (pageNum <= 1) {
@@ -225,36 +276,6 @@
         }
         scale -= 0.25;
         queueRenderPage(pageNum);
-      });
-      
-      // Descargar PDF
-      document.getElementById('download-pdf').addEventListener('click', function() {
-        const link = document.createElement('a');
-        link.href = pdfUrl;
-        link.download = '<%= nombreArchivo %>';
-        link.target = '_blank';
-        link.click();
-      });
-      
-      // Cargar el PDF
-      pdfjsLib.getDocument(pdfUrl).promise.then(function(pdf) {
-        pdfDoc = pdf;
-        
-        // Asegurarse de que la página inicial esté dentro del rango
-        if (initialPage > pdfDoc.numPages) {
-          pageNum = 1;
-        }
-        
-        // Renderizar la primera página
-        renderPage(pageNum);
-      }).catch(function(error) {
-        console.error('Error al cargar el PDF:', error);
-        loadingIndicator.innerHTML = `
-          <div class="alert alert-danger">
-            <i class="fas fa-exclamation-triangle me-2"></i>
-            Error al cargar el PDF: ${error.message}
-          </div>
-        `;
       });
     });
   </script>

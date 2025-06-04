@@ -1,16 +1,21 @@
 require('dotenv').config();
-const mysql = require('mysql2/promise');
+const { Pool } = require('pg');
 
-// Configuración de la conexión a la base de datos
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'b9bifbbpdpxex5rtkjba-mysql.services.clever-cloud.com',
-  user: process.env.DB_USER || 'u10vawhkeqpflq8e',
-  password: process.env.DB_PASSWORD || 'dLrHAL9rvCnHjuHLGhIW',
-  database: process.env.DB_NAME || 'b9bifbbpdpxex5rtkjba',
-  port: process.env.DB_PORT || 3306,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
+// Configuración de la conexión a la base de datos PostgreSQL
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL, // Usar una variable de entorno para la URL de conexión
+  ssl: {
+    rejectUnauthorized: false // Puede ser necesario para Clever Cloud si usan SSL autofirmado
+  }
+});
+
+pool.on('connect', () => {
+  console.log('Conectado a la base de datos PostgreSQL');
+});
+
+pool.on('error', (err) => {
+  console.error('Error de conexión a la base de datos PostgreSQL:', err);
+  process.exit(-1); // Salir de la aplicación si hay un error fatal en la conexión
 });
 
 module.exports = pool; 
