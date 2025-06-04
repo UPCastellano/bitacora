@@ -6,6 +6,8 @@ const cors = require('cors');
 const pdfParse = require('pdf-parse');
 const pool = require('./config/database');
 
+// Este comentario es para forzar un nuevo despliegue en Vercel
+
 // Configurar Express
 const app = express();
 const PORT = process.env.PORT || 3000;
