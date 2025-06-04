@@ -23,7 +23,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Configurar EJS como motor de plantillas
 app.set('view engine', 'ejs');
-app.set('views', path.join(__dirname, 'views'));
+app.set('views', path.join(__dirname, '../views'));
 
 // Configurar almacenamiento para archivos PDF
 const storage = multer.diskStorage({
