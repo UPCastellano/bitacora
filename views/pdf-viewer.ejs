@@ -146,6 +146,9 @@
       const pageInfo = document.getElementById('page-info');
       const loadingIndicator = document.getElementById('loading');
       
+      console.log('PDF Viewer: Ruta del archivo PDF:', pdfUrl);
+      console.log('PDF Viewer: Página inicial recibida:', initialPage);
+      
       // Función para renderizar la página
       function renderPage(num) {
         pageRendering = true;
