@@ -14,8 +14,8 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static(path.join(__dirname, '../public')));
 
 // No es necesario servir la carpeta 'uploads' localmente ya que los archivos estarán en Cellar
@@ -28,8 +28,8 @@ app.set('views', path.join(__dirname, '../views'));
 // Rutas
 app.get('/', async (req, res) => {
   try {
-    // Obtenemos todos los documentos para pasarlos a la vista
-    const [documentos] = await pool.execute('SELECT id, nombre, num_paginas, fecha_subida FROM documentos ORDER BY fecha_subida DESC');
+    // Obtenemos todos los documentos para pasarlos a la vista, incluyendo ruta_archivo
+    const [documentos] = await pool.execute('SELECT id, nombre, num_paginas, fecha_subida, ruta_archivo FROM documentos ORDER BY fecha_subida DESC');
     
     // Renderizamos la vista con los documentos
     res.render('index', { documentos });
@@ -40,7 +40,7 @@ app.get('/', async (req, res) => {
   }
 });
 
-// Ruta para obtener una URL pre-firmada para subida directa a Cellar
+// Ruta para obtener una URL pre-firmada para subida directa de PDF a Cellar
 app.get('/s3-signed-url', async (req, res) => {
   const fileName = req.query.fileName;
   const fileType = req.query.fileType;
@@ -66,36 +66,55 @@ app.get('/s3-signed-url', async (req, res) => {
   }
 });
 
-// Subir PDF (ahora recibe solo metadatos y la clave S3 del cliente)
+// Nueva ruta para obtener una URL pre-firmada para subida directa de TEXTO JSON a Cellar
+app.get('/s3-signed-text-url', async (req, res) => {
+  const originalName = req.query.originalName;
+  if (!originalName) {
+    return res.status(400).json({ error: 'Falta el parámetro originalName' });
+  }
+
+  const s3Params = {
+    Bucket: S3_BUCKET_NAME,
+    Key: `text/${Date.now()}-${originalName.replace(/\.pdf$/i, '.json')}`,
+    Expires: 300, // La URL expira en 300 segundos (5 minutos)
+    ContentType: 'application/json',
+    ACL: 'public-read' // O private
+  };
+
+  try {
+    const uploadURL = await s3.getSignedUrlPromise('putObject', s3Params);
+    res.json({ uploadURL: uploadURL, s3TextKey: s3Params.Key });
+  } catch (error) {
+    console.error('Error al obtener URL pre-firmada para texto S3/Cellar:', error);
+    res.status(500).json({ error: 'Error al obtener la URL de subida de texto a S3/Cellar' });
+  }
+});
+
+// Subir PDF (ahora recibe solo metadatos y las claves S3 del PDF y del TEXTO del cliente)
 app.post('/upload', async (req, res) => {
   try {
-    const { s3Key, originalname, numPaginas, contenidoCompleto, paginasContenido } = req.body;
+    // Ahora esperamos s3Key (para el PDF) y s3TextKey (para el JSON de texto)
+    const { s3Key, originalname, numPaginas, s3TextKey } = req.body;
 
-    if (!s3Key || !originalname || !numPaginas || !contenidoCompleto) {
-      return res.status(400).json({ error: 'Faltan datos de la subida (s3Key, originalname, numPaginas, contenidoCompleto)' });
+    if (!s3Key || !originalname || !numPaginas || !s3TextKey) {
+      return res.status(400).json({ error: 'Faltan datos de la subida (s3Key, originalname, numPaginas, s3TextKey)' });
     }
 
     const connection = await pool.getConnection(); // Obtener una conexión del pool para MySQL
     try {
       await connection.beginTransaction(); // Iniciar transacción para MySQL
 
-      // Insertar documento con la URL de S3 y el contenido completo
+      // Insertar documento con la URL de S3 del PDF y la clave S3 del texto
+      // La columna 'contenido' ahora guardará la clave S3 del archivo JSON de texto
       const [documentoResult] = await connection.execute(
         'INSERT INTO documentos (nombre, ruta_archivo, contenido, num_paginas) VALUES (?, ?, ?, ?)',
-        [originalname, s3Key, contenidoCompleto, numPaginas]
+        [originalname, s3Key, s3TextKey, numPaginas] // 'contenido' ahora es s3TextKey
       );
 
       const documentoId = documentoResult.insertId; // Obtener el ID del documento insertado para MySQL
 
-      // Insertar contenido por página si se envía desde el cliente
-      if (paginasContenido && Array.isArray(paginasContenido)) {
-        for (let i = 0; i < paginasContenido.length; i++) {
-          await connection.execute(
-            'INSERT INTO paginas_documento (documento_id, numero_pagina, contenido) VALUES (?, ?, ?)',
-            [documentoId, i + 1, paginasContenido[i]]
-          );
-        }
-      }
+      // No necesitamos insertar paginas_documento aquí si el frontend envía todo el texto
+      // El frontend se encargará de subir el JSON de texto a Cellar y nosotros solo guardamos la s3TextKey
 
       await connection.commit(); // Confirmar transacción
       res.json({
@@ -104,6 +123,7 @@ app.post('/upload', async (req, res) => {
         documentId: documentoId,
         fileName: originalname,
         s3Url: s3Key,
+        s3TextUrl: s3TextKey, // Devolvemos también la clave del texto
         pages: numPaginas
       });
     } catch (error) {
@@ -122,8 +142,8 @@ app.post('/upload', async (req, res) => {
 // Obtener todos los documentos
 app.get('/documentos', async (req, res) => {
   try {
-    // Usar pool.execute para MySQL
-    const [rows] = await pool.execute('SELECT id, nombre, num_paginas, fecha_subida FROM documentos ORDER BY fecha_subida DESC');
+    // Usar pool.execute para MySQL, incluyendo ruta_archivo y contenido (que ahora es s3TextKey)
+    const [rows] = await pool.execute('SELECT id, nombre, num_paginas, fecha_subida, ruta_archivo, contenido as s3TextKey FROM documentos ORDER BY fecha_subida DESC');
     res.json(rows);
   } catch (error) {
     console.error('Error al obtener documentos:', error);
@@ -141,9 +161,9 @@ app.delete('/documentos/:id', async (req, res) => {
     connection = await pool.getConnection(); // Obtener una conexión del pool para MySQL
     await connection.beginTransaction();
 
-    // Obtener la ruta del archivo de S3/Cellar antes de eliminar el registro de la DB
+    // Obtener la ruta del archivo de S3/Cellar y la clave del texto antes de eliminar el registro de la DB
     const [rows] = await connection.execute(
-      'SELECT ruta_archivo FROM documentos WHERE id = ?',
+      'SELECT ruta_archivo, contenido as s3TextKey FROM documentos WHERE id = ?',
       [documentoId]
     );
 
@@ -154,6 +174,7 @@ app.delete('/documentos/:id', async (req, res) => {
     }
 
     const s3KeyToDelete = rows[0].ruta_archivo;
+    const s3TextKeyToDelete = rows[0].s3TextKey;
 
     // Eliminar de la base de datos (ON DELETE CASCADE se encargará de paginas_documento)
     await connection.execute(
@@ -161,14 +182,24 @@ app.delete('/documentos/:id', async (req, res) => {
       [documentoId]
     );
 
-    // Eliminar el archivo de S3/Cellar
+    // Eliminar el archivo PDF de S3/Cellar
     if (s3KeyToDelete) {
       const params = {
         Bucket: S3_BUCKET_NAME,
         Key: s3KeyToDelete
       };
       await s3.deleteObject(params).promise();
-      console.log(`Archivo ${s3KeyToDelete} eliminado de S3/Cellar.`);
+      console.log(`Archivo PDF ${s3KeyToDelete} eliminado de S3/Cellar.`);
+    }
+
+    // Eliminar el archivo de texto JSON de S3/Cellar
+    if (s3TextKeyToDelete) {
+      const params = {
+        Bucket: S3_BUCKET_NAME,
+        Key: s3TextKeyToDelete
+      };
+      await s3.deleteObject(params).promise();
+      console.log(`Archivo de texto ${s3TextKeyToDelete} eliminado de S3/Cellar.`);
     }
 
     await connection.commit();
@@ -186,7 +217,22 @@ app.delete('/documentos/:id', async (req, res) => {
   }
 });
 
-// Buscar por número de serie - Versión mejorada
+// Función para descargar contenido de texto de Cellar
+async function downloadTextFromS3(s3TextKey) {
+  const params = {
+    Bucket: S3_BUCKET_NAME,
+    Key: s3TextKey,
+  };
+  try {
+    const data = await s3.getObject(params).promise();
+    return JSON.parse(data.Body.toString('utf-8')); // Parsear como JSON
+  } catch (error) {
+    console.error(`Error al descargar texto de S3/Cellar para ${s3TextKey}:`, error);
+    throw new Error('Error al descargar el contenido del texto del documento.');
+  }
+}
+
+// Buscar por número de serie - Versión mejorada para leer de Cellar
 app.get('/buscar/serial', async (req, res) => {
   const { serial, documentoId } = req.query;
   
@@ -197,75 +243,78 @@ app.get('/buscar/serial', async (req, res) => {
     
     const formattedSerial = serial.trim();
     
-    console.log('Buscando número de serie:', formattedSerial);
-    console.log('Documento ID:', documentoId || 'Todos los documentos');
-    
     let sql, params;
-    
+    let documentosConTexto = [];
+
+    // Primero, obtener documentos relevantes para descargar su texto
     if (documentoId) {
-      sql = `
-        SELECT d.id, d.nombre, d.num_paginas, p.id as pagina_id, p.numero_pagina, p.contenido 
-        FROM documentos d 
-        JOIN paginas_documento p ON d.id = p.documento_id 
-        WHERE d.id = ? AND (
-          p.contenido LIKE ? OR 
-          p.contenido LIKE ? OR 
-          p.contenido LIKE ? OR
-          p.contenido LIKE ?
-        )
-        ORDER BY p.numero_pagina ASC
-      `;
-      params = [
-        documentoId,
-        `%N⁰ ${formattedSerial}%`,
-        `%N° ${formattedSerial}%`,
-        `%Nº ${formattedSerial}%`,
-        `%N.${formattedSerial}%`
-      ];
+      sql = 'SELECT id, nombre, num_paginas, ruta_archivo, contenido as s3TextKey FROM documentos WHERE id = ?';
+      params = [documentoId];
     } else {
-      sql = `
-        SELECT d.id, d.nombre, d.num_paginas, p.id as pagina_id, p.numero_pagina, p.contenido 
-        FROM documentos d 
-        JOIN paginas_documento p ON d.id = p.documento_id 
-        WHERE 
-          p.contenido LIKE ? OR 
-          p.contenido LIKE ? OR 
-          p.contenido LIKE ? OR
-          p.contenido LIKE ?
-        ORDER BY d.id ASC, p.numero_pagina ASC
-      `;
-      params = [
-        `%N⁰ ${formattedSerial}%`,
-        `%N° ${formattedSerial}%`,
-        `%Nº ${formattedSerial}%`,
-        `%N.${formattedSerial}%`
-      ];
+      sql = 'SELECT id, nombre, num_paginas, ruta_archivo, contenido as s3TextKey FROM documentos';
+      params = [];
     }
+
+    const [docs] = await pool.execute(sql, params);
     
-    const [rows] = await pool.execute(sql, params);
-    
-    if (rows.length === 0) {
+    // Descargar el contenido de texto de cada documento desde Cellar y buscar
+    for (const doc of docs) {
+      if (doc.s3TextKey) {
+        try {
+          const textData = await downloadTextFromS3(doc.s3TextKey);
+          // Asegurarse de que textData.paginasContenido es un array
+          if (textData && Array.isArray(textData.paginasContenido)) {
+            for (let i = 0; i < textData.paginasContenido.length; i++) {
+              const paginaContenido = textData.paginasContenido[i];
+              // Realizar la búsqueda en el contenido de la página
+              const patterns = [
+                `%N⁰ ${formattedSerial}%`,
+                `%N° ${formattedSerial}%`,
+                `%Nº ${formattedSerial}%`,
+                `%N.${formattedSerial}%`,
+                `%${formattedSerial}%` // Búsqueda genérica también
+              ];
+              
+              let found = false;
+              for (const pattern of patterns) {
+                if (paginaContenido.includes(pattern.replace(/%/g, ''))) { // Simplificado para `includes` en JS
+                  found = true;
+                  break;
+                }
+              }
+
+              if (found) {
+                documentosConTexto.push({
+                  id: doc.id,
+                  nombre: doc.nombre,
+                  num_paginas: doc.num_paginas,
+                  pagina_id: i + 1, // Simula el ID de la página
+                  numero_pagina: i + 1,
+                  contenido_pagina: paginaContenido.substring(0, 500) + '...' // Devolver un snippet
+                });
+              }
+            }
+          }
+        } catch (downloadError) {
+          console.warn(`No se pudo descargar o procesar texto para el documento ${doc.id}:`, downloadError.message);
+          // Continuar con otros documentos
+        }
+      }
+    }
+
+    if (documentosConTexto.length === 0) {
       return res.status(404).json({ message: 'Número de serie no encontrado en el documento o documentos especificados.' });
     }
     
-    // Estructurar los resultados para la respuesta
-    const resultados = rows.map(row => ({
-      id: row.id,
-      nombre: row.nombre,
-      num_paginas: row.num_paginas,
-      pagina_id: row.pagina_id,
-      numero_pagina: row.numero_pagina,
-      contenido_pagina: row.contenido // Contenido de la página donde se encontró
-    }));
+    res.json(documentosConTexto);
 
-    res.json(resultados);
   } catch (error) {
     console.error('Error en la búsqueda por número de serie:', error);
     res.status(500).json({ error: 'Error al realizar la búsqueda' });
   }
 });
 
-// Buscar por número de página - Versión simplificada y mejorada
+// Buscar por número de página - Versión mejorada para leer de Cellar
 app.get('/buscar/pagina', async (req, res) => {
   const { documentoId, pagina } = req.query;
   
@@ -278,46 +327,42 @@ app.get('/buscar/pagina', async (req, res) => {
       return res.status(400).json({ error: 'Se requiere especificar un número de página' });
     }
     
-    // Asegurarnos que pagina sea un número entero
     const paginaNum = parseInt(pagina, 10);
     if (isNaN(paginaNum) || paginaNum <= 0) {
       return res.status(400).json({ error: 'El número de página debe ser un número positivo' });
     }
     
-    console.log(`Buscando página ${paginaNum} del documento ${documentoId}`);
+    // Obtener la clave S3 del texto del documento
+    const [docRows] = await pool.execute('SELECT ruta_archivo, contenido as s3TextKey FROM documentos WHERE id = ?', [documentoId]);
     
-    // Obtener información del documento y la página en una consulta
-    const result = await pool.execute(`
-      SELECT 
-        d.id, 
-        d.nombre, 
-        d.num_paginas, 
-        p.id as pagina_id,
-        p.numero_pagina, 
-        p.contenido 
-      FROM documentos d 
-      LEFT JOIN paginas_documento p ON d.id = p.documento_id AND p.numero_pagina = ?
-      WHERE d.id = ?
-    `, [paginaNum, documentoId]);
-    
-    const resultados = result.rows;
-
-    if (resultados.length === 0) {
-      return res.status(404).json({ error: 'No se encontró el documento especificado' });
+    if (docRows.length === 0) {
+      return res.status(404).json({ error: 'Documento no encontrado' });
     }
     
-    const documento = resultados[0];
+    const documento = docRows[0];
+
+    if (!documento.s3TextKey) {
+      return res.status(500).json({ error: 'No se encontró la clave del texto del documento en Cellar.' });
+    }
+
+    // Descargar el contenido de texto completo del documento desde Cellar
+    const textData = await downloadTextFromS3(documento.s3TextKey);
     
-    // Verificar si se encontró la página
-    if (!documento.pagina_id) {
+    if (!textData || !Array.isArray(textData.paginasContenido) || paginaNum > textData.paginasContenido.length) {
       return res.status(404).json({ 
-        error: `La página ${paginaNum} no existe o no tiene contenido. El documento tiene ${documento.num_paginas} páginas` 
+        error: `La página ${paginaNum} no existe o no tiene contenido. El documento tiene ${textData ? textData.paginasContenido.length : 0} páginas` 
       });
     }
     
-    // Retornar el resultado
-    console.log(`Página ${paginaNum} encontrada para el documento ${documentoId}`);
-    res.json(resultados);
+    const contenidoPagina = textData.paginasContenido[paginaNum - 1]; // Array es 0-indexed
+
+    res.json({
+      id: documento.id,
+      nombre: documento.nombre,
+      num_paginas: documento.num_paginas,
+      numero_pagina: paginaNum,
+      contenido_pagina: contenidoPagina
+    });
   } catch (error) {
     console.error('Error en la búsqueda por número de página:', error);
     res.status(500).json({ error: 'Error al realizar la búsqueda por número de página' });

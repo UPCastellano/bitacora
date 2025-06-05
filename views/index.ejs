@@ -215,41 +215,6 @@
   <script src="https://cdn.datatables.net/1.13.5/js/dataTables.bootstrap5.min.js"></script>
   <!-- PDF.js para extraer texto en el cliente -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs" type="module"></script>
-  <script>
-    // Configurar la ruta del worker de PDF.js
-    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs`;
-  </script>
-  <script src="/js/main.js"></script>
-  <script>
-    // Script para manejar el selector de documentos en formulario serialForm
-    document.addEventListener('DOMContentLoaded', function() {
-      const buscarTodosSerial = document.getElementById('buscarTodosSerial');
-      const selectorDocumentoSerial = document.getElementById('selectorDocumentoSerial');
-      const documentoIdSerial = document.getElementById('documentoIdSerial');
-      
-      if (buscarTodosSerial && selectorDocumentoSerial && documentoIdSerial) {
-        buscarTodosSerial.addEventListener('change', function() {
-          if (this.checked) {
-            selectorDocumentoSerial.classList.add('d-none');
-            documentoIdSerial.value = '';
-          } else {
-            selectorDocumentoSerial.classList.remove('d-none');
-          }
-        });
-      }
-      
-      // Asegurar que tenemos el selector de documentos actualizado
-      const documentSelect = document.getElementById('documentSelect');
-      if (documentSelect && documentoIdSerial) {
-        // Sincronizar opciones del selector principal al selector del form serial
-        documentSelect.addEventListener('change', function() {
-          // Solo actualizar si estamos en modo de búsqueda por documento específico
-          if (!buscarTodosSerial.checked) {
-            documentoIdSerial.value = this.value;
-          }
-        });
-      }
-    });
-  </script>
+  <script src="/js/main.js" type="module"></script>
 </body>
 </html> 
