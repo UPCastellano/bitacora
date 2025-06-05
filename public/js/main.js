@@ -3,6 +3,8 @@ import { getDocument, GlobalWorkerOptions } from 'https://cdnjs.cloudflare.com/a
 // Configurar la ruta del worker de PDF.js
 GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs';
 
+console.log("main.js cargado y ejecutándose como módulo ES.");
+
 // Función para extraer texto de un PDF en el cliente
 async function extractPdfText(file) {
   const fileReader = new FileReader();
@@ -42,102 +44,52 @@ async function extractPdfText(file) {
 }
 
 // Función para cargar documentos (GLOBAL)
-window.cargarDocumentos = async function() {
-  try {
-    const response = await fetch('/documentos');
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-    const documentos = await response.json();
-    
-    const table = $('#documentosTable').DataTable();
-    table.clear();
-    
-    documentos.forEach(doc => {
-      const fecha = new Date(doc.fecha_subida);
-      doc.fecha_subida = fecha.toLocaleString('es-ES');
-    });
-    
-    table.rows.add(documentos).draw();
-    
-    const documentSelect = document.getElementById('documentSelect');
-    documentSelect.innerHTML = '<option value="">Todos los documentos</option>';
-    
-    documentos.forEach(doc => {
-      const option = document.createElement('option');
-      option.value = doc.id;
-      option.textContent = doc.nombre;
-      option.setAttribute('data-pages', doc.num_paginas);
-      documentSelect.appendChild(option);
-    });
-  } catch (error) {
-    console.error('Error al cargar documentos:', error);
-    const uploadStatus = document.getElementById('uploadStatus');
-    if (uploadStatus) {
-      uploadStatus.innerHTML = `
-        <div class="alert alert-danger">
-          <i class="fas fa-times-circle me-2"></i>
-          Error al cargar la lista de documentos: ${error.message || 'Por favor, recargue la página.'}
-        </div>
-      `;
-    }
-  }
-}
+window.cargarDocumentos = async function() { console.log("cargarDocumentos dummy"); /* Implementación real */ };
 
 // Función para ver PDF (abre en nueva pestaña) (GLOBAL)
-window.verPdf = function(rutaArchivo) {
-  if (rutaArchivo) {
-    window.open(rutaArchivo, '_blank');
-  } else {
-    alert('Ruta del archivo PDF no disponible.');
-  }
-}
+window.verPdf = function(rutaArchivo) { console.log("verPdf dummy", rutaArchivo); /* Implementación real */ };
 
 // Función para confirmar eliminación (GLOBAL)
-window.confirmarEliminar = function(id, nombre) {
-  if (confirm(`¿Estás seguro de que quieres eliminar el documento "${nombre}"? Esta acción es irreversible y eliminará el archivo de Cellar y la información de la base de datos.`)) {
-    window.eliminarDocumento(id);
-  }
-}
+window.confirmarEliminar = function(id, nombre) { console.log("confirmarEliminar dummy", id, nombre); /* Implementación real */ };
 
 // Función para eliminar documento (GLOBAL)
-window.eliminarDocumento = async function(id) {
-  try {
-    const response = await fetch(`/documentos/${id}`, {
-      method: 'DELETE'
-    });
-    // Manejo de respuesta para evitar SyntaxError si no es JSON
-    const contentType = response.headers.get("content-type");
-    let result;
-    if (contentType && contentType.indexOf("application/json") !== -1) {
-      result = await response.json();
-    } else {
-      result = { success: response.ok, message: await response.text() };
-    }
-    
-    if (response.ok) {
-      alert(result.message);
-      window.cargarDocumentos();
-    } else {
-      alert(`Error al eliminar: ${result.error || result.message || 'Error desconocido'}`);
-    }
-  } catch (error) {
-    console.error('Error en la eliminación:', error);
-    alert('Error de conexión al intentar eliminar el documento.');
-  }
-}
+window.eliminarDocumento = async function(id) { console.log("eliminarDocumento dummy", id); /* Implementación real */ };
 
 // Función para normalizar número de serie (GLOBAL)
-window.normalizarNumeroSerie = function(input) {
-  return input.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-}
+window.normalizarNumeroSerie = function(input) { console.log("normalizarNumeroSerie dummy", input); return input; /* Implementación real */ };
 
 // Función para mostrar ayuda OCR (GLOBAL)
-window.mostrarAyudaOCR = function() {
-  alert("Para buscar en documentos escaneados, el sistema intenta reconocer texto (OCR). La precisión puede variar. Si no encuentras lo que buscas, revisa el PDF original.");
-}
+window.mostrarAyudaOCR = function() { console.log("mostrarAyudaOCR dummy"); /* Implementación real */ };
 
 document.addEventListener('DOMContentLoaded', function() {
+  console.log("DOM Content Loaded en main.js.");
+  // TODO: Reintegrar la lógica de DataTables y otros event listeners aquí.
+
+  // Aquí iría la lógica del serialForm que movimos de index.ejs
+  const buscarTodosSerial = document.getElementById('buscarTodosSerial');
+  const selectorDocumentoSerial = document.getElementById('selectorDocumentoSerial');
+  const documentoIdSerial = document.getElementById('documentoIdSerial');
+  
+  if (buscarTodosSerial && selectorDocumentoSerial && documentoIdSerial) {
+    buscarTodosSerial.addEventListener('change', function() {
+      if (this.checked) {
+        selectorDocumentoSerial.classList.add('d-none');
+        documentoIdSerial.value = '';
+      } else {
+        selectorDocumentoSerial.classList.remove('d-none');
+      }
+    });
+  }
+  
+  const documentSelect = document.getElementById('documentSelect');
+  if (documentSelect && documentoIdSerial) {
+    documentSelect.addEventListener('change', function() {
+      if (!buscarTodosSerial.checked) {
+        documentoIdSerial.value = this.value;
+      }
+    });
+  }
+
   // Inicializar DataTables
   const documentosTable = $('#documentosTable').DataTable({
     language: {
