@@ -17,11 +17,10 @@
     "dotenv": "^16.5.0",
     "ejs": "^3.1.10",
     "express": "^5.1.0",
-    "multer": "^2.0.1",
     "mysql2": "^3.14.1",
     "pdf-parse": "^1.1.1",
     "pdfbusqueda": "file:",
-    "pg": "^8.16.0",
+    "pdfjs-dist": "^4.4.168",
     "readable-stream": "^4.0.0"
   },
   "devDependencies": {

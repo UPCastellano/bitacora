@@ -1,10 +1,10 @@
 const express = require('express');
-const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const cors = require('cors');
 const pdfParse = require('pdf-parse');
 const pool = require('../config/database');
+const { s3, S3_BUCKET_NAME } = require('../config/s3');
 
 // Este comentario es para forzar un nuevo despliegue en Vercel
 
@@ -14,36 +14,22 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(express.static(path.join(__dirname, '../public')));
 
-// No es necesario servir la carpeta 'uploads' localmente ya que los archivos estarán en la base de datos
+// No es necesario servir la carpeta 'uploads' localmente ya que los archivos estarán en Cellar
 // app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // Configurar EJS como motor de plantillas
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, '../views'));
 
-// Configurar almacenamiento para archivos PDF (usar memoryStorage para guardar en DB)
-const upload = multer({
-  storage: multer.memoryStorage(), // Almacenar en memoria temporalmente para leer el buffer
-  fileFilter: function (req, file, cb) {
-    if (file.mimetype !== 'application/pdf') {
-      return cb(new Error('Solo se permiten archivos PDF'));
-    }
-    cb(null, true);
-  },
-  limits: {
-    fileSize: 50 * 1024 * 1024 // 50MB límite, ajusta si es necesario
-  }
-});
-
 // Rutas
 app.get('/', async (req, res) => {
   try {
     // Obtenemos todos los documentos para pasarlos a la vista
-    const [documentos] = await pool.query('SELECT id, nombre, num_paginas, fecha_subida FROM documentos ORDER BY fecha_subida DESC');
+    const [documentos] = await pool.execute('SELECT id, nombre, num_paginas, fecha_subida FROM documentos ORDER BY fecha_subida DESC');
     
     // Renderizamos la vista con los documentos
     res.render('index', { documentos });
@@ -54,85 +40,74 @@ app.get('/', async (req, res) => {
   }
 });
 
-// Ruta para obtener una URL pre-firmada para subida directa a S3 (¡Esta ruta ya no se usa y se eliminará!)
-// app.get('/s3-signed-url', async (req, res) => {
-//   const fileName = req.query.fileName;
-//   const fileType = req.query.fileType;
+// Ruta para obtener una URL pre-firmada para subida directa a Cellar
+app.get('/s3-signed-url', async (req, res) => {
+  const fileName = req.query.fileName;
+  const fileType = req.query.fileType;
 
-//   if (!fileName || !fileType) {
-//     return res.status(400).json({ error: 'Faltan parámetros: fileName o fileType' });
-//   }
+  if (!fileName || !fileType) {
+    return res.status(400).json({ error: 'Faltan parámetros: fileName o fileType' });
+  }
 
-//   const s3Params = {
-//     Bucket: S3_BUCKET_NAME,
-//     Key: `pdfs/${Date.now()}-${fileName}`,
-//     Expires: 60, // La URL expira en 60 segundos
-//     ContentType: fileType,
-//     ACL: 'public-read'
-//   };
+  const s3Params = {
+    Bucket: S3_BUCKET_NAME,
+    Key: `pdfs/${Date.now()}-${fileName}`,
+    Expires: 300, // La URL expira en 300 segundos (5 minutos)
+    ContentType: fileType,
+    ACL: 'public-read' // O private, si controlas el acceso a través de tu aplicación
+  };
 
-//   try {
-//     const uploadURL = await s3.getSignedUrlPromise('putObject', s3Params);
-//     res.json({ uploadURL: uploadURL, s3Key: s3Params.Key });
-//   } catch (error) {
-//     console.error('Error al obtener URL pre-firmada de S3:', error);
-//     res.status(500).json({ error: 'Error al obtener la URL de subida de S3' });
-//   }
-// });
-
-// Subir PDF (modificado para guardar directamente en PostgreSQL)
-app.post('/upload', upload.single('pdfFile'), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No se ha subido ningún archivo' });
+    const uploadURL = await s3.getSignedUrlPromise('putObject', s3Params);
+    res.json({ uploadURL: uploadURL, s3Key: s3Params.Key });
+  } catch (error) {
+    console.error('Error al obtener URL pre-firmada de S3/Cellar:', error);
+    res.status(500).json({ error: 'Error al obtener la URL de subida de S3/Cellar' });
+  }
+});
+
+// Subir PDF (ahora recibe solo metadatos y la clave S3 del cliente)
+app.post('/upload', async (req, res) => {
+  try {
+    const { s3Key, originalname, numPaginas, contenidoCompleto, paginasContenido } = req.body;
+
+    if (!s3Key || !originalname || !numPaginas || !contenidoCompleto) {
+      return res.status(400).json({ error: 'Faltan datos de la subida (s3Key, originalname, numPaginas, contenidoCompleto)' });
     }
 
-    const fileBuffer = req.file.buffer; // Contenido binario del PDF
-    const originalname = req.file.originalname;
-    
-    // Extraer texto del PDF desde el buffer en memoria
-    const pdfData = await pdfParse(fileBuffer);
-    const numPaginas = pdfData.numpages;
-    const contenidoCompleto = pdfData.text;
-    
-    // Guardar en la base de datos
-    const connection = await pool.connect(); // Usar pool.connect() para pg
+    const connection = await pool.getConnection(); // Obtener una conexión del pool para MySQL
     try {
-      await connection.query('BEGIN'); // Iniciar transacción
-      
-      // Insertar documento con el contenido binario del PDF
-      const documentoResult = await connection.query(
-        'INSERT INTO documentos (nombre, contenido_pdf, contenido, num_paginas) VALUES ($1, $2, $3, $4) RETURNING id',
-        [originalname, fileBuffer, contenidoCompleto, numPaginas]
+      await connection.beginTransaction(); // Iniciar transacción para MySQL
+
+      // Insertar documento con la URL de S3 y el contenido completo
+      const [documentoResult] = await connection.execute(
+        'INSERT INTO documentos (nombre, ruta_archivo, contenido, num_paginas) VALUES (?, ?, ?, ?)',
+        [originalname, s3Key, contenidoCompleto, numPaginas]
       );
-      
-      const documentoId = documentoResult.rows[0].id; // Obtener el ID del documento insertado
-      
-      // Extraer y guardar contenido por página
-      for (let i = 1; i <= numPaginas; i++) {
-        const options = {
-          max: i,
-          min: i
-        };
-        
-        const pageData = await pdfParse(fileBuffer, options);
-        
-        await connection.query(
-          'INSERT INTO paginas_documento (documento_id, numero_pagina, contenido) VALUES ($1, $2, $3)',
-          [documentoId, i, pageData.text]
-        );
+
+      const documentoId = documentoResult.insertId; // Obtener el ID del documento insertado para MySQL
+
+      // Insertar contenido por página si se envía desde el cliente
+      if (paginasContenido && Array.isArray(paginasContenido)) {
+        for (let i = 0; i < paginasContenido.length; i++) {
+          await connection.execute(
+            'INSERT INTO paginas_documento (documento_id, numero_pagina, contenido) VALUES (?, ?, ?)',
+            [documentoId, i + 1, paginasContenido[i]]
+          );
+        }
       }
-      
-      await connection.query('COMMIT'); // Confirmar transacción
-      res.json({ 
-        success: true, 
+
+      await connection.commit(); // Confirmar transacción
+      res.json({
+        success: true,
         message: 'Archivo subido y procesado correctamente',
         documentId: documentoId,
         fileName: originalname,
+        s3Url: s3Key,
         pages: numPaginas
       });
     } catch (error) {
-      await connection.query('ROLLBACK'); // Revertir transacción en caso de error
+      await connection.rollback(); // Revertir transacción en caso de error
       console.error('Error al guardar en la base de datos:', error);
       res.status(500).json({ error: 'Error al procesar el archivo o guardar en la base de datos' });
     } finally {
@@ -140,16 +115,16 @@ app.post('/upload', upload.single('pdfFile'), async (req, res) => {
     }
   } catch (error) {
     console.error('Error general en la subida:', error);
-    res.status(500).json({ error: 'Error al procesar el archivo PDF' });
+    res.status(500).json({ error: 'Error al procesar la subida de metadatos' });
   }
 });
 
 // Obtener todos los documentos
 app.get('/documentos', async (req, res) => {
   try {
-    // Usar pool.query para PostgreSQL
-    const result = await pool.query('SELECT id, nombre, num_paginas, fecha_subida FROM documentos ORDER BY fecha_subida DESC');
-    res.json(result.rows);
+    // Usar pool.execute para MySQL
+    const [rows] = await pool.execute('SELECT id, nombre, num_paginas, fecha_subida FROM documentos ORDER BY fecha_subida DESC');
+    res.json(rows);
   } catch (error) {
     console.error('Error al obtener documentos:', error);
     // En caso de error, devolver un array vacío para evitar TypeError en el frontend
@@ -157,38 +132,61 @@ app.get('/documentos', async (req, res) => {
   }
 });
 
-// Eliminar documento (modificado para PostgreSQL y sin S3)
+// Eliminar documento (modificado para MySQL y S3/Cellar)
 app.delete('/documentos/:id', async (req, res) => {
   const documentoId = req.params.id;
   
+  let connection; // Declarar connection fuera del try para que sea accesible en finally
   try {
-    const connection = await pool.connect();
-    try {
-      await connection.query('BEGIN');
-      
-      // No necesitamos obtener la ruta del archivo, el PDF está en la DB y se elimina con el registro.
-      // La restricción ON DELETE CASCADE en paginas_documento se encargará de las páginas.
-      await connection.query(
-        'DELETE FROM documentos WHERE id = $1',
-        [documentoId]
-      );
-      
-      await connection.query('COMMIT');
-      res.json({ success: true, message: 'Documento eliminado correctamente' });
-    } catch (error) {
-      await connection.query('ROLLBACK');
-      console.error('Error al eliminar documento:', error);
-      res.status(500).json({ error: 'Error al eliminar el documento' });
-    } finally {
+    connection = await pool.getConnection(); // Obtener una conexión del pool para MySQL
+    await connection.beginTransaction();
+
+    // Obtener la ruta del archivo de S3/Cellar antes de eliminar el registro de la DB
+    const [rows] = await connection.execute(
+      'SELECT ruta_archivo FROM documentos WHERE id = ?',
+      [documentoId]
+    );
+
+    if (rows.length === 0) {
+      await connection.rollback();
+      connection.release();
+      return res.status(404).json({ error: 'Documento no encontrado' });
+    }
+
+    const s3KeyToDelete = rows[0].ruta_archivo;
+
+    // Eliminar de la base de datos (ON DELETE CASCADE se encargará de paginas_documento)
+    await connection.execute(
+      'DELETE FROM documentos WHERE id = ?',
+      [documentoId]
+    );
+
+    // Eliminar el archivo de S3/Cellar
+    if (s3KeyToDelete) {
+      const params = {
+        Bucket: S3_BUCKET_NAME,
+        Key: s3KeyToDelete
+      };
+      await s3.deleteObject(params).promise();
+      console.log(`Archivo ${s3KeyToDelete} eliminado de S3/Cellar.`);
+    }
+
+    await connection.commit();
+    res.json({ success: true, message: 'Documento eliminado correctamente' });
+  } catch (error) {
+    if (connection) {
+      await connection.rollback();
+    }
+    console.error('Error al eliminar documento:', error);
+    res.status(500).json({ error: 'Error al eliminar el documento' });
+  } finally {
+    if (connection) {
       connection.release();
     }
-  } catch (error) {
-    console.error('Error al conectar con la base de datos:', error);
-    res.status(500).json({ error: 'Error de conexión con la base de datos' });
   }
 });
 
-// Buscar por número de serie - Versión mejorada con detección para documentos escaneados
+// Buscar por número de serie - Versión mejorada
 app.get('/buscar/serial', async (req, res) => {
   const { serial, documentoId } = req.query;
   
@@ -197,7 +195,6 @@ app.get('/buscar/serial', async (req, res) => {
       return res.status(400).json({ error: 'Se requiere un número de serie para realizar la búsqueda' });
     }
     
-    // Formatear el número de serie para la búsqueda
     const formattedSerial = serial.trim();
     
     console.log('Buscando número de serie:', formattedSerial);
@@ -205,182 +202,66 @@ app.get('/buscar/serial', async (req, res) => {
     
     let sql, params;
     
-    // Búsqueda más específica y precisa - reducimos el uso de patrones muy genéricos
     if (documentoId) {
-      // Búsqueda en documento específico con patrones más precisos
       sql = `
         SELECT d.id, d.nombre, d.num_paginas, p.id as pagina_id, p.numero_pagina, p.contenido 
         FROM documentos d 
         JOIN paginas_documento p ON d.id = p.documento_id 
-        WHERE d.id = $1 AND (
-          p.contenido ILIKE $2 OR 
-          p.contenido ILIKE $3 OR 
-          p.contenido ILIKE $4 OR
-          p.contenido ILIKE $5
+        WHERE d.id = ? AND (
+          p.contenido LIKE ? OR 
+          p.contenido LIKE ? OR 
+          p.contenido LIKE ? OR
+          p.contenido LIKE ?
         )
         ORDER BY p.numero_pagina ASC
       `;
-      // Patrones específicos para el número de serie con formato exacto
       params = [
-        documentoId, 
-        `%N⁰ ${formattedSerial}%`, 
+        documentoId,
+        `%N⁰ ${formattedSerial}%`,
         `%N° ${formattedSerial}%`,
         `%Nº ${formattedSerial}%`,
         `%N.${formattedSerial}%`
       ];
     } else {
-      // Búsqueda en todos los documentos
       sql = `
         SELECT d.id, d.nombre, d.num_paginas, p.id as pagina_id, p.numero_pagina, p.contenido 
         FROM documentos d 
         JOIN paginas_documento p ON d.id = p.documento_id 
         WHERE 
-          p.contenido ILIKE $1 OR 
-          p.contenido ILIKE $2 OR 
-          p.contenido ILIKE $3 OR
-          p.contenido ILIKE $4
+          p.contenido LIKE ? OR 
+          p.contenido LIKE ? OR 
+          p.contenido LIKE ? OR
+          p.contenido LIKE ?
         ORDER BY d.id ASC, p.numero_pagina ASC
       `;
       params = [
-        `%N⁰ ${formattedSerial}%`, 
+        `%N⁰ ${formattedSerial}%`,
         `%N° ${formattedSerial}%`,
         `%Nº ${formattedSerial}%`,
         `%N.${formattedSerial}%`
       ];
     }
     
-    console.log('SQL:', sql, 'Params:', params);
+    const [rows] = await pool.execute(sql, params);
     
-    const resultados = await pool.query(sql, params);
-    console.log(`Se encontraron ${resultados.rows.length} resultados`);
-    
-    // Si no encontramos resultados, intentar con una búsqueda más amplia
-    if (resultados.rows.length === 0) {
-      console.log('No se encontraron resultados con búsqueda específica, intentando búsqueda más amplia...');
-      
-      // Segunda búsqueda más amplia
-      let sql2, params2;
-      
-      if (documentoId) {
-        sql2 = `
-          SELECT d.id, d.nombre, d.num_paginas, p.id as pagina_id, p.numero_pagina, p.contenido 
-          FROM documentos d 
-          JOIN paginas_documento p ON d.id = p.documento_id 
-          WHERE d.id = $1 AND (
-            p.contenido ILIKE $2 OR 
-            p.contenido ILIKE $3
-          )
-          ORDER BY p.numero_pagina ASC
-        `;
-        params2 = [
-          documentoId, 
-          `%N%${formattedSerial}%`, 
-          `%${formattedSerial}%`
-        ];
-      } else {
-        sql2 = `
-          SELECT d.id, d.nombre, d.num_paginas, p.id as pagina_id, p.numero_pagina, p.contenido 
-          FROM documentos d 
-          JOIN paginas_documento p ON d.id = p.documento_id 
-          WHERE 
-            p.contenido ILIKE $1 OR 
-            p.contenido ILIKE $2
-          ORDER BY d.id ASC, p.numero_pagina ASC
-          LIMIT 20
-        `;
-        params2 = [
-          `%N%${formattedSerial}%`,
-          `%${formattedSerial}%`
-        ];
-      }
-      
-      const resultadosAmpliados = await pool.query(sql2, params2);
-      if (resultadosAmpliados.rows.length > 0) {
-        console.log(`Búsqueda ampliada encontró ${resultadosAmpliados.rows.length} resultados`);
-      }
-      
-      // Combinar resultados si encontramos algo
-      if (resultadosAmpliados.rows.length > 0) {
-        resultados.rows.push(...resultadosAmpliados.rows);
-      }
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Número de serie no encontrado en el documento o documentos especificados.' });
     }
     
-    // Procesar cada resultado para encontrar y marcar la coincidencia exacta
-    const results = resultados.rows.map(result => {
-      if (result.contenido) {
-        // Lista de patrones específicos para el número de serie
-        const patrones = [
-          `N⁰\\s*${formattedSerial}\\b`,
-          `N°\\s*${formattedSerial}\\b`,
-          `Nº\\s*${formattedSerial}\\b`,
-          `N\\.\\s*${formattedSerial}\\b`,
-          `N\\s+${formattedSerial}\\b`
-        ];
-        
-        // Buscar cada patrón
-        for (const patron of patrones) {
-          try {
-            const regex = new RegExp(patron, 'i');
-            const match = result.contenido.match(regex);
-            
-            if (match) {
-              console.log(`Coincidencia encontrada: "${match[0]}" en página ${result.numero_pagina} del documento ${result.id}`);
-              result.matchedText = match[0];
-              result.matchPosition = match.index;
-              
-              // Extraer un fragmento más grande para contexto
-              const startPos = Math.max(0, match.index - 150);
-              const endPos = Math.min(result.contenido.length, match.index + match[0].length + 150);
-              result.matchContext = result.contenido.substring(startPos, endPos);
-              
-              result.exactMatch = true;
-              break;
-            }
-          } catch (regexError) {
-            console.error(`Error en regex '${patron}':`, regexError);
-            continue;
-          }
-        }
-        
-        // Si no encontramos coincidencia exacta, buscar patrón más general
-        if (!result.exactMatch) {
-          try {
-            const serialRegex = new RegExp(`(?:[Nn][°⁰º.]?\\s*)?${formattedSerial}\\b`, 'i');
-            const match = result.contenido.match(serialRegex);
-            
-            if (match) {
-              result.matchedText = match[0];
-              result.matchPosition = match.index;
-              
-              const startPos = Math.max(0, match.index - 150);
-              const endPos = Math.min(result.contenido.length, match.index + match[0].length + 150);
-              result.matchContext = result.contenido.substring(startPos, endPos);
-              
-              result.possibleMatch = true;
-            }
-          } catch (error) {
-            console.error('Error en búsqueda general:', error);
-          }
-        }
-      }
-      return result;
-    });
-    
-    // Filtrar para mostrar primero los resultados con coincidencia exacta
-    const exactMatches = results.filter(r => r.exactMatch);
-    const possibleMatches = results.filter(r => !r.exactMatch && r.possibleMatch);
-    const otherMatches = results.filter(r => !r.exactMatch && !r.possibleMatch);
-    
-    // Ordenar los resultados por relevancia
-    const orderedResults = [...exactMatches, ...possibleMatches, ...otherMatches];
-    
-    // Limitar resultados para evitar sobrecarga
-    const limitedResults = orderedResults.slice(0, 20);
-    
-    res.json(limitedResults);
+    // Estructurar los resultados para la respuesta
+    const resultados = rows.map(row => ({
+      id: row.id,
+      nombre: row.nombre,
+      num_paginas: row.num_paginas,
+      pagina_id: row.pagina_id,
+      numero_pagina: row.numero_pagina,
+      contenido_pagina: row.contenido // Contenido de la página donde se encontró
+    }));
+
+    res.json(resultados);
   } catch (error) {
     console.error('Error en la búsqueda por número de serie:', error);
-    res.status(500).json({ error: 'Error al realizar la búsqueda por número de serie' });
+    res.status(500).json({ error: 'Error al realizar la búsqueda' });
   }
 });
 
@@ -406,7 +287,7 @@ app.get('/buscar/pagina', async (req, res) => {
     console.log(`Buscando página ${paginaNum} del documento ${documentoId}`);
     
     // Obtener información del documento y la página en una consulta
-    const result = await pool.query(`
+    const result = await pool.execute(`
       SELECT 
         d.id, 
         d.nombre, 
@@ -415,8 +296,8 @@ app.get('/buscar/pagina', async (req, res) => {
         p.numero_pagina, 
         p.contenido 
       FROM documentos d 
-      LEFT JOIN paginas_documento p ON d.id = p.documento_id AND p.numero_pagina = $1
-      WHERE d.id = $2
+      LEFT JOIN paginas_documento p ON d.id = p.documento_id AND p.numero_pagina = ?
+      WHERE d.id = ?
     `, [paginaNum, documentoId]);
     
     const resultados = result.rows;
@@ -468,75 +349,66 @@ app.get('/resultados', (req, res) => {
   });
 });
 
-// Nueva ruta para ver PDF en página específica (ahora sirve el PDF desde la DB)
+// Ruta para ver un PDF - Ahora obtiene la URL de Cellar de la DB y redirige/sirve directamente
 app.get('/ver-pdf/:id', async (req, res) => {
+  const documentoId = req.params.id;
+
   try {
-    const documentoId = req.params.id;
-    
-    console.log(`Solicitando PDF binario del documento ${documentoId}`);
-    
-    // Obtener el contenido binario del PDF desde la base de datos
-    const result = await pool.query(
-      'SELECT nombre, contenido_pdf FROM documentos WHERE id = $1',
-      [documentoId]
-    );
-    
-    const documentos = result.rows;
+    const [rows] = await pool.execute('SELECT ruta_archivo, nombre FROM documentos WHERE id = ?', [documentoId]);
 
-    if (documentos.length === 0 || !documentos[0].contenido_pdf) {
-      return res.status(404).send('Documento no encontrado o contenido PDF vacío');
+    if (rows.length === 0) {
+      return res.status(404).send('Documento no encontrado.');
     }
-    
-    const pdfBuffer = documentos[0].contenido_pdf; // El contenido binario del PDF
-    const nombreArchivo = documentos[0].nombre;
 
-    // Establecer cabeceras para el archivo PDF
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${nombreArchivo.replace(/\s/g, '_')}.pdf"`);
-    res.send(pdfBuffer); // Enviar el buffer binario directamente
-    
+    const { ruta_archivo, nombre } = rows[0];
+
+    if (!ruta_archivo) {
+      return res.status(500).send('La ruta del archivo PDF no está disponible.');
+    }
+
+    // Redirigir al cliente directamente a la URL de Cellar
+    res.redirect(ruta_archivo);
+
   } catch (error) {
-    console.error('Error al obtener el PDF desde la DB:', error);
-    res.status(500).send('Error al obtener el PDF desde la base de datos');
+    console.error('Error al obtener el PDF de la base de datos o Cellar:', error);
+    res.status(500).send('Error al cargar el PDF.');
   }
 });
 
-// Nueva ruta para ver el PDF directamente con la página correcta (ahora sirve el PDF desde la DB)
+// Ruta para ver páginas específicas del PDF (si se almacena contenido por página)
+// Este endpoint se mantiene para la lógica de búsqueda, pero no para servir el PDF completo
 app.get('/ver-pdf-directo/:documentoId/:pagina', async (req, res) => {
-  try {
-    const documentoId = req.params.documentoId;
-    const pagina = parseInt(req.params.pagina) || 1; // La página se usará solo para la redirección en el frontend
-    
-    console.log(`Mostrando PDF directo del documento ${documentoId}, página ${pagina}`);
-    
-    // Obtener el contenido binario del PDF desde la base de datos
-    const result = await pool.query(
-      'SELECT nombre, contenido_pdf FROM documentos WHERE id = $1',
-      [documentoId]
-    );
-    
-    const documentos = result.rows;
+  const { documentoId, pagina } = req.params;
 
-    if (documentos.length === 0 || !documentos[0].contenido_pdf) {
-      return res.status(404).send('Documento no encontrado o contenido PDF vacío');
+  try {
+    const [rows] = await pool.execute(
+      'SELECT d.ruta_archivo, p.contenido FROM documentos d JOIN paginas_documento p ON d.id = p.documento_id WHERE d.id = ? AND p.numero_pagina = ?',
+      [documentoId, pagina]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).send('Página no encontrada o documento no existe.');
     }
     
-    const pdfBuffer = documentos[0].contenido_pdf;
-    const nombreArchivo = documentos[0].nombre;
+    const { ruta_archivo, contenido } = rows[0];
 
-    // Establecer cabeceras para el archivo PDF
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${nombreArchivo.replace(/\s/g, '_')}.pdf"`);
+    // Puedes elegir cómo usar esto:
+    // 1. Devolver solo el contenido de texto de la página:
+    // res.send(contenido);
     
-    // Para PDF.js y la navegación por página, es mejor redirigir a la ruta /ver-pdf/:id
-    // y luego pasar el parámetro de página en el frontend.
-    // Aquí, simplemente enviamos el PDF y el frontend lo manejará.
-    res.send(pdfBuffer);
-    
+    // 2. O redirigir al PDF completo en Cellar y depender del visor para ir a la página
+    res.redirect(ruta_archivo); // Redirigir al PDF completo
+
   } catch (error) {
-    console.error('Error al mostrar el PDF directo desde la DB:', error);
-    res.status(500).send('Error al obtener el PDF desde la base de datos');
+    console.error('Error al obtener la página del PDF o Cellar:', error);
+    res.status(500).send('Error al cargar la página del PDF.');
   }
 });
 
+// Manejo de errores 404
+app.use((req, res, next) => {
+  res.status(404).send('Lo siento, no puedo encontrar eso!');
+});
+
+// Exportar la aplicación Express para Vercel Serverless Functions
 module.exports = app; 
